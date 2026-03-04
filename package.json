@@ -1,0 +1,8 @@
+{
+    "name": "api-transform-proxy",
+    "private": true,
+    "type": "module",
+    "dependencies": {
+      "jsonata": "^2.0.6"
+    }
+  }

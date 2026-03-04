@@ -1,0 +1,8 @@
+name = "api-transform-proxy"
+main = "src/index.js"
+compatibility_date = "2026-03-01"
+workers_dev = true
+
+# KV binding (no IDs) -> automatic provisioning on deploy (beta)
+[[kv_namespaces]]
+binding = "CONFIG"
