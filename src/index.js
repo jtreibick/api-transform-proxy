@@ -2,8 +2,7 @@
  * API transform relay for Bubble-style clients.
  *
  * Endpoints:
- * - GET /_apiproxy               : status page (never initializes)
- * - GET /_apiproxy/init          : bootstrap missing keys (shown once on creation)
+ * - GET /_apiproxy               : status + bootstrap page (shows created keys once)
  * - POST /_apiproxy/request      : authenticated relay + optional JSONata transform
  * - GET /_apiproxy/admin/version : build version info (admin key required)
  * - POST /_apiproxy/admin/rotate : authenticated key rotation (admin key required)
@@ -144,9 +143,6 @@ export default {
       if (normalizedPath === RESERVED_ROOT && request.method === "GET") {
         return await handleStatusPage(env, request);
       }
-      if (normalizedPath === `${RESERVED_ROOT}/init` && request.method === "GET") {
-        return await handleInitPage(env, request);
-      }
       if (normalizedPath === `${RESERVED_ROOT}/request` && request.method === "POST") {
         return await handleRequest(request, env);
       }
@@ -224,7 +220,7 @@ class HttpError extends Error {
 function renderError(error, pathname) {
   const err = toHttpError(error);
 
-  if ((pathname === RESERVED_ROOT || pathname === `${RESERVED_ROOT}/init`) && err.status >= 500) {
+  if (pathname === RESERVED_ROOT && err.status >= 500) {
     return new Response(
       htmlPage(
         "Configuration error",
@@ -1174,7 +1170,7 @@ async function getProxyKeyAuthState(env) {
 async function requireProxyKey(request, env) {
   const { current, old, oldExpiresAt } = await getProxyKeyAuthState(env);
   if (!current) {
-    throw new HttpError(503, "NOT_INITIALIZED", `Proxy not initialized. Visit ${RESERVED_ROOT}/init first.`);
+    throw new HttpError(503, "NOT_INITIALIZED", `Proxy not initialized. Visit ${RESERVED_ROOT} first.`);
   }
 
   const got = request.headers.get("X-Proxy-Key") || "";
@@ -1205,7 +1201,7 @@ async function requireAdminKey(request, env) {
       503,
       "ADMIN_NOT_CONFIGURED",
       "Admin key is not initialized.",
-      { setup: `Visit ${RESERVED_ROOT}/init to bootstrap keys.` }
+      { setup: `Visit ${RESERVED_ROOT} to bootstrap keys.` }
     );
   }
 
@@ -1319,7 +1315,7 @@ async function handleStatusPage(env, request) {
   const proxyInitialized = !!proxyKey;
   const adminInitialized = !!adminKey;
   if (!proxyInitialized || !adminInitialized) {
-    return Response.redirect(new URL(`${RESERVED_ROOT}/init`, request.url).toString(), 302);
+    return handleInitPage(env, request);
   }
   const testingDocsUrl = getDocsSectionUrl(env, "testing-out-your-proxy");
   const keyManagementDocsUrl = getDocsSectionUrl(env, "key-management");
@@ -1328,12 +1324,25 @@ async function handleStatusPage(env, request) {
     htmlPage(
       "API Transform Proxy",
       `<p><b>Status:</b> 🟢 Running</p>
-       <p><b>Admin API Key:</b> ••••••••••••• (key cannot be viewed again)</p>
-       <p><b>Proxy API Key:</b> ••••••••••••• (key cannot be viewed again)</p>
+       ${renderSecretField(
+         "Admin API Key",
+         "••••••••••••••••••••••••••••••••",
+         "admin-api-secret-status",
+         "API Key previously created, keys cannot be viewed again.",
+         false
+       )}
+       ${renderSecretField(
+         "Proxy API Key",
+         "••••••••••••••••••••••••••••••••",
+         "proxy-api-secret-status",
+         "API Key previously created, keys cannot be viewed again.",
+         false
+       )}
        <p><b>How to reset keys</b><br />
        <a href="${escapeHtml(keyManagementDocsUrl)}" target="_blank" rel="noopener noreferrer">Rotating keys</a></p>
        <p><b>How to test</b><br />
-       <a href="${escapeHtml(testingDocsUrl)}" target="_blank" rel="noopener noreferrer">Testing out your proxy</a></p>`
+       <a href="${escapeHtml(testingDocsUrl)}" target="_blank" rel="noopener noreferrer">Testing out your proxy</a></p>
+       ${renderSecretFieldScript()}`
     ),
     { headers: { "content-type": "text/html; charset=utf-8" } }
   );
@@ -1563,7 +1572,8 @@ async function handleInitPage(env, request) {
   const [existingProxy, existingAdmin] = await Promise.all([env.CONFIG.get(KV_PROXY_KEY), env.CONFIG.get(KV_ADMIN_KEY)]);
   let createdProxy = null;
   let createdAdmin = null;
-  const curlExample = renderRequestCurlExample(new URL(request.url).origin);
+  const testingDocsUrl = getDocsSectionUrl(env, "testing-out-your-proxy");
+  const keyManagementDocsUrl = getDocsSectionUrl(env, "key-management");
 
   if (!existingProxy) {
     createdProxy = generateSecret();
@@ -1575,8 +1585,6 @@ async function handleInitPage(env, request) {
   }
 
   if (!createdProxy && !createdAdmin) {
-    const testingDocsUrl = getDocsSectionUrl(env, "testing-out-your-proxy");
-    const keyManagementDocsUrl = getDocsSectionUrl(env, "key-management");
     return new Response(
       htmlPage(
         "Proxy already initialized. Keys are only shown once.",
@@ -1591,48 +1599,59 @@ async function handleInitPage(env, request) {
     );
   }
 
+  const createdNow = [
+    createdAdmin ? "Admin API Key" : null,
+    createdProxy ? "Proxy API Key" : null,
+  ]
+    .filter(Boolean)
+    .join(" and ");
+  const noKeysInitially = !existingProxy && !existingAdmin;
+
   return new Response(
     htmlPage(
       "API Secrets",
-      `<p><b>Proxy status:</b> initialized</p>
+      `${noKeysInitially ? `<h1 style="margin:0 0 10px 0;font-size:1.4rem;">Copy these keys.</h1>` : ""}
+       <p><b>Created now:</b> ${escapeHtml(createdNow)}</p>
        <p style="color:#b91c1c;font-weight:700;">
          These API secrets will only be displayed on this page one time. Please copy and store them safely.
        </p>
-       ${createdAdmin ? renderSecretField("Admin API Secret", createdAdmin, "admin-api-secret") : ""}
-       ${createdProxy ? renderSecretField("Requestor API Secret", createdProxy, "requestor-api-secret") : ""}
-       <script>
-         function toggleSecret(id) {
-           const input = document.getElementById(id);
-           const btn = document.querySelector('[data-toggle-for=\"' + id + '\"]');
-           if (!input || !btn) return;
-           const isHidden = input.type === 'password';
-           input.type = isHidden ? 'text' : 'password';
-           btn.textContent = isHidden ? 'Hide' : 'Show';
-         }
-         async function copySecret(id) {
-           const input = document.getElementById(id);
-           const btn = document.querySelector('[data-copy-for=\"' + id + '\"]');
-           if (!input || !btn || !input.value) return;
-           try {
-             await navigator.clipboard.writeText(input.value);
-             const old = btn.textContent;
-             btn.textContent = 'Copied';
-             setTimeout(() => { btn.textContent = old; }, 1200);
-           } catch {}
-         }
-       </script>
-       <p><b>Next step:</b> call <code>POST ${RESERVED_ROOT}/request</code>.</p>
-       ${curlExample}`
+       ${renderSecretField(
+         "Admin API Secret",
+         createdAdmin || "••••••••••••••••••••••••••••••••",
+         "admin-api-secret",
+         createdAdmin
+           ? "API Key created, keys cannot be viewed again."
+           : "API Key previously created, keys cannot be viewed again.",
+         !!createdAdmin
+       )}
+       ${renderSecretField(
+         "Requestor API Secret",
+         createdProxy || "••••••••••••••••••••••••••••••••",
+         "requestor-api-secret",
+         createdProxy
+           ? "API Key created, keys cannot be viewed again."
+           : "API Key previously created, keys cannot be viewed again.",
+         !!createdProxy
+       )}
+       <p><b>How to reset keys</b><br />
+       <a href="${escapeHtml(keyManagementDocsUrl)}" target="_blank" rel="noopener noreferrer">Rotating keys</a></p>
+       <p><b>How to test</b><br />
+       <a href="${escapeHtml(testingDocsUrl)}" target="_blank" rel="noopener noreferrer">Testing out your proxy</a></p>
+       ${renderSecretFieldScript()}`
     ),
     { headers: { "content-type": "text/html; charset=utf-8" } }
   );
 }
 
-function renderSecretField(label, value, id, note = "") {
+function renderSecretField(label, value, id, note = "", actionsEnabled = true) {
   const safeLabel = escapeHtml(label);
   const safeValue = escapeHtml(value);
   const safeId = escapeHtml(id);
   const safeNote = escapeHtml(note || "");
+  const disabledAttr = actionsEnabled ? "" : " disabled";
+  const buttonStyle = actionsEnabled
+    ? "padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;cursor:pointer;"
+    : "padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;background:#f3f4f6;color:#9ca3af;cursor:not-allowed;opacity:0.85;";
   return `
     <div style="margin:14px 0;">
       <div style="font-weight:700;margin-bottom:6px;">${safeLabel}</div>
@@ -1640,26 +1659,37 @@ function renderSecretField(label, value, id, note = "") {
         <input id="${safeId}" type="password" value="${safeValue}" readonly
           style="flex:1;min-width:320px;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace;" />
         <button type="button" data-toggle-for="${safeId}" onclick="toggleSecret('${safeId}')"
-          style="padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;cursor:pointer;">Show</button>
+          style="${buttonStyle}"${disabledAttr}>Show</button>
         <button type="button" data-copy-for="${safeId}" onclick="copySecret('${safeId}')"
-          style="padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;cursor:pointer;">Copy</button>
+          style="${buttonStyle}"${disabledAttr}>Copy</button>
       </div>
-      ${safeNote ? `<div style="margin-top:6px;color:#6b7280;">${safeNote}</div>` : ""}
+      ${safeNote ? `<div style="margin-top:6px;color:#6b7280;font-size:12px;">${safeNote}</div>` : ""}
     </div>
   `;
 }
 
-function renderRequestCurlExample(origin) {
-  const base = String(origin || "").replace(/\/+$/, "");
-  const cmd = `curl -sS "${base}${RESERVED_ROOT}/request" \\
-  -H "Content-Type: application/json" \\
-  -H "X-Proxy-Key: <YOUR_PROXY_KEY>" \\
-  -H "X-Proxy-Host: https://httpbin.org" \\
-  --data '{"upstream":{"method":"GET","url":"/json"}}'`;
-  return `
-    <h3>Test with curl</h3>
-    <pre style="padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(cmd)}</pre>
-  `;
+function renderSecretFieldScript() {
+  return `<script>
+    function toggleSecret(id) {
+      const input = document.getElementById(id);
+      const btn = document.querySelector('[data-toggle-for=\"' + id + '\"]');
+      if (!input || !btn || btn.disabled) return;
+      const isHidden = input.type === 'password';
+      input.type = isHidden ? 'text' : 'password';
+      btn.textContent = isHidden ? 'Hide' : 'Show';
+    }
+    async function copySecret(id) {
+      const input = document.getElementById(id);
+      const btn = document.querySelector('[data-copy-for=\"' + id + '\"]');
+      if (!input || !btn || btn.disabled || !input.value) return;
+      try {
+        await navigator.clipboard.writeText(input.value);
+        const old = btn.textContent;
+        btn.textContent = 'Copied';
+        setTimeout(() => { btn.textContent = old; }, 1200);
+      } catch {}
+    }
+  </script>`;
 }
 
 function getDocsSectionUrl(env, sectionAnchor) {

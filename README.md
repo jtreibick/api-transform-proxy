@@ -17,10 +17,10 @@ Customer-self-hosted Worker that relays upstream API calls and optionally applie
 - `https://your-worker.workers.dev/` redirects to `/_apiproxy/` (unless `X-Proxy-Key` is sent).
 
 3. Bootstrap keys in your browser (first run only):
-- `https://your-worker.workers.dev/_apiproxy/init`
-- Trailing slashes are accepted on routes (for example `/_apiproxy/init/`).
+- `https://your-worker.workers.dev/_apiproxy`
+- Trailing slashes are accepted on routes (for example `/_apiproxy/`).
 
-- If keys do not exist, the init page shows both:
+- If keys do not exist, the proxy page shows newly-created keys:
   - `X-Admin-Key`
   - `X-Proxy-Key`
 - Copy and store both immediately. They are shown only when created.
@@ -44,8 +44,8 @@ For curl-based API verification, use the **Testing out your proxy** section belo
 
 ## Key management
 
-- Keys are shown only once on `GET /_apiproxy/init` when they are created.
-- If keys already exist, `GET /_apiproxy/init` will not reveal them again.
+- Keys are shown only once on `GET /_apiproxy` when they are created.
+- If keys already exist, `GET /_apiproxy` will not reveal them again.
 
 Proxy key rotation:
 - Call `POST /_apiproxy/admin/rotate` with `X-Admin-Key`.
@@ -60,7 +60,9 @@ Recovery when admin key is lost:
 1. Open Cloudflare dashboard for this Worker.
 2. Open KV namespace `CONFIG`.
 3. Delete `admin_key` (and optionally `proxy_key`, `proxy_key_old`, `proxy_key_old_expires_at`).
-4. Revisit `/_apiproxy/init` to recreate missing keys.
+4. Revisit `/_apiproxy` to recreate missing keys.
+
+<p><strong style="color:#b91c1c;">Important: after deleting keys in Cloudflare KV, propagation may take up to 2 minutes. During that window, <code>/_apiproxy</code> can still detect the old key state and will not recreate keys yet. Wait and refresh to avoid confusion.</strong></p>
 
 ## Contract Freeze (Step 1)
 
@@ -133,9 +135,9 @@ binding = "CONFIG"
 ## Endpoints
 
 - `GET /_apiproxy`
-  - Status page only.
-  - Never creates or rotates keys.
-  - Shows initialized state and next step.
+  - Status + bootstrap page.
+  - If keys are missing, creates missing key(s) and shows each newly-created key once.
+  - If keys already exist, shows running/status view and never reveals existing key values.
 - `GET /`
   - If `X-Proxy-Key` is absent: redirects (`302`) to `/_apiproxy/`.
   - If `X-Proxy-Key` is present: executes a proxied `GET` to upstream root path (`/`) using the same host resolution, allowlist, header forwarding, and transform pipeline as `POST /_apiproxy/request`.
@@ -143,12 +145,6 @@ binding = "CONFIG"
   - Returns the deployed build version as JSON.
   - Requires header `X-Admin-Key`.
   - Uses `BUILD_VERSION` env var, defaults to `dev` if unset.
-- `GET /_apiproxy/init`
-  - Bootstraps missing keys:
-    - `proxy_key` for `X-Proxy-Key`
-    - `admin_key` for `X-Admin-Key`
-  - Shows each key once at creation time.
-  - If both already exist, keys are not shown.
 - `POST /_apiproxy/request`
   - Requires header `X-Proxy-Key`.
   - Requires `Content-Type: application/json`.
@@ -280,14 +276,14 @@ export WORKER_URL="https://your-worker.workers.dev"
 Bootstrap keys first (shown once when created):
 
 ```bash
-curl -sS "$WORKER_URL/_apiproxy/init"
+curl -sS "$WORKER_URL/_apiproxy"
 ```
 
 Then set:
 
 ```bash
-export ADMIN_KEY="value-shown-by-init"
-export PROXY_KEY="value-shown-by-init"
+export ADMIN_KEY="value-shown-by-bootstrap"
+export PROXY_KEY="value-shown-by-bootstrap"
 ```
 
 1) Validate config YAML (no persistence):
@@ -344,8 +340,7 @@ curl -sS "$WORKER_URL/_apiproxy/request" \
 
 ## Acceptance checklist
 
-- `GET /_apiproxy` never creates keys.
-- `GET /_apiproxy/init` creates missing proxy/admin keys once; subsequent calls do not reveal existing keys.
+- `GET /_apiproxy` creates missing proxy/admin keys once; subsequent calls do not reveal existing keys.
 - `/request` rejects missing proxy auth key with consistent error shape.
 - Host resolution follows config:
   - `targetHost` set => rejects `X-Proxy-Host`.
