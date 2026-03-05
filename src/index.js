@@ -119,6 +119,15 @@ const DEFAULT_CONFIG_V1 = {
 let jsonataFactory = null;
 let yamlApi = null;
 
+const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#0f172a"/>
+  <path d="M22 16c-8 7-12 16-12 16s4 9 12 16" fill="none" stroke="#e2e8f0" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M42 16c8 7 12 16 12 16s-4 9-12 16" fill="none" stroke="#e2e8f0" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M32 22l1.9 4.1 4.5.6-3.3 3.1.8 4.4-3.9-2.2-3.9 2.2.8-4.4-3.3-3.1 4.5-.6L32 22z" fill="#22d3ee"/>
+</svg>`;
+
+const FAVICON_DATA_URL = `data:image/svg+xml,${encodeURIComponent(FAVICON_SVG)}`;
+
 export default {
   async fetch(request, env) {
     const { pathname } = new URL(request.url);
@@ -1568,29 +1577,69 @@ async function handleInitPage(env) {
 
   return new Response(
     htmlPage(
-      "Bootstrap complete",
-      `<p><b>Status:</b> initialized</p>
-       ${
-         createdProxy
-           ? `<p>Copy this proxy key now and store it as <code>X-Proxy-Key</code>.</p>
-       <pre style="padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-all;">${escapeHtml(
-         createdProxy
-       )}</pre>`
-           : "<p>Proxy key was already initialized and is not shown again.</p>"
-       }
-       ${
-         createdAdmin
-           ? `<p>Copy this admin key now and store it as <code>X-Admin-Key</code>.</p>
-       <pre style="padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-all;">${escapeHtml(
-         createdAdmin
-       )}</pre>`
-           : "<p>Admin key was already initialized and is not shown again.</p>"
-       }
-       <p>These keys are only shown when first created.</p>
-       <p><b>Next:</b> call <code>POST ${RESERVED_ROOT}/request</code>.</p>`
+      "API Secrets",
+      `<p><b>Proxy status:</b> initialized</p>
+       <p style="color:#b91c1c;font-weight:700;">
+         These API secrets will only be displayed on this page one time. Please copy and store them safely.
+       </p>
+       ${renderSecretField(
+         "Admin API Secret",
+         createdAdmin || "",
+         "admin-api-secret",
+         createdAdmin ? "" : "Not shown (already initialized)"
+       )}
+       ${renderSecretField(
+         "Requestor API Secret",
+         createdProxy || "",
+         "requestor-api-secret",
+         createdProxy ? "" : "Not shown (already initialized)"
+       )}
+       <script>
+         function toggleSecret(id) {
+           const input = document.getElementById(id);
+           const btn = document.querySelector('[data-toggle-for=\"' + id + '\"]');
+           if (!input || !btn) return;
+           const isHidden = input.type === 'password';
+           input.type = isHidden ? 'text' : 'password';
+           btn.textContent = isHidden ? 'Hide' : 'Show';
+         }
+         async function copySecret(id) {
+           const input = document.getElementById(id);
+           const btn = document.querySelector('[data-copy-for=\"' + id + '\"]');
+           if (!input || !btn || !input.value) return;
+           try {
+             await navigator.clipboard.writeText(input.value);
+             const old = btn.textContent;
+             btn.textContent = 'Copied';
+             setTimeout(() => { btn.textContent = old; }, 1200);
+           } catch {}
+         }
+       </script>
+       <p><b>Next step:</b> call <code>POST ${RESERVED_ROOT}/request</code>.</p>`
     ),
     { headers: { "content-type": "text/html; charset=utf-8" } }
   );
+}
+
+function renderSecretField(label, value, id, note = "") {
+  const safeLabel = escapeHtml(label);
+  const safeValue = escapeHtml(value);
+  const safeId = escapeHtml(id);
+  const safeNote = escapeHtml(note || "");
+  return `
+    <div style="margin:14px 0;">
+      <div style="font-weight:700;margin-bottom:6px;">${safeLabel}</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <input id="${safeId}" type="password" value="${safeValue}" readonly
+          style="flex:1;min-width:320px;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace;" />
+        <button type="button" data-toggle-for="${safeId}" onclick="toggleSecret('${safeId}')"
+          style="padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;cursor:pointer;">Show</button>
+        <button type="button" data-copy-for="${safeId}" onclick="copySecret('${safeId}')"
+          style="padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;cursor:pointer;">Copy</button>
+      </div>
+      ${safeNote ? `<div style="margin-top:6px;color:#6b7280;">${safeNote}</div>` : ""}
+    </div>
+  `;
 }
 
 async function handleRotate(request, env) {
@@ -1883,6 +1932,7 @@ function htmlPage(title, bodyHtml) {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>${escapeHtml(title)}</title>
+  <link rel="icon" type="image/svg+xml" href="${FAVICON_DATA_URL}" />
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 32px; max-width: 820px; }
     code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
