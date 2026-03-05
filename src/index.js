@@ -1570,11 +1570,14 @@ async function handleInitPage(env, request) {
     return new Response(
       htmlPage(
         "Proxy Already Initialized",
-        `<p>Proxy and admin keys already exist and are intentionally not shown again.</p>
-         <p><b>Important:</b> existing keys cannot be retrieved after first display.</p>
-         <p><b>How to get new API keys:</b></p>
-         <p>If you need a new requester key, use <code>POST ${ADMIN_ROOT}/rotate</code>.</p>
-         <p>If you need a new administrator key, remove keys manually in the Cloudflare control plane: open KV namespace <code>CONFIG</code>, delete <code>admin_key</code> (and optionally <code>proxy_key</code>, <code>proxy_key_old</code>, <code>proxy_key_old_expires_at</code>), then refresh <code>${RESERVED_ROOT}/init</code> to recreate keys.</p>
+        `<p>Proxy and admin keys already exist and are intentionally not able to be shown again. Instructions to generate replacement API keys are below.</p>
+         <p><b>Generate New API keys:</b></p>
+         <p>If you need a new proxy key: <code>POST ${ADMIN_ROOT}/rotate</code>.</p>
+         <p>If you need a new administrator (or proxy) key:</p>
+         <p>1. Open the Cloudflare control plane.</p>
+         <p>2. Open KV namespace <code>CONFIG</code>.</p>
+         <p>3. Delete <code>admin_key</code> (and optionally <code>proxy_key</code>, <code>proxy_key_old</code>, <code>proxy_key_old_expires_at</code>).</p>
+         <p>4. Refresh this page (<code>${RESERVED_ROOT}/init</code>) to recreate keys.</p>
          <p style="color:#6b7280;">These recovery instructions are shown only when keys already exist and are hidden.</p>
          ${curlExample}`
       ),
