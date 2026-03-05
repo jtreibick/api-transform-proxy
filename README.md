@@ -145,7 +145,7 @@ header_forwarding:
   - Example secret variable: `TARGET_AUTH_BEARER` (or `targetAuthBearer`).
   - Env-managed headers are locked from `PUT/DELETE /_apiproxy/admin/headers/:name`; update env + redeploy instead.
 - Optional: set Worker variable `BUILD_VERSION` (for `GET /_apiproxy/admin/version`), e.g. a git SHA or release tag.
-- Optional: set `ALLOWED_HOSTS` as comma-separated hosts. Admin-managed hosts are stored in KV and merged with this list.
+- Optional: set `ALLOWED_HOSTS` as comma-separated hosts to enforce host allowlisting.
 - Optional: set `ROTATE_OVERLAP_MS` (default `600000`) to keep old proxy key valid briefly after rotation.
 
 `wrangler.toml` should include:
@@ -212,12 +212,10 @@ wrangler secret put TARGET_AUTH_BEARER
   - Uses `BUILD_VERSION` env var, defaults to `dev` if unset.
 - `GET /_apiproxy/admin`
   - Browser admin console for all admin endpoints.
-  - Prompts for `X-Admin-Key`, then provides UI controls for debug, logging endpoint, hosts, config, enriched headers, and key rotation.
+  - Prompts for `X-Admin-Key`, then provides UI controls for status, config, debug/logging, enrichments, and key rotation.
 - `GET /_apiproxy/admin/debug`
   - Requires header `X-Admin-Key`.
   - Returns debug status, remaining TTL, and configured `debug.max_ttl_seconds`.
-- `GET /_apiproxy/admin/debug-ui`
-  - Legacy path, redirects to `GET /_apiproxy/admin`.
 - `PUT /_apiproxy/admin/debug`
   - Requires header `X-Admin-Key`.
   - Requires `Content-Type: application/json`.
@@ -266,16 +264,6 @@ wrangler secret put TARGET_AUTH_BEARER
 - `POST /_apiproxy/admin/rotate-admin`
   - Requires header `X-Admin-Key`.
   - Rotates admin key and returns the new admin key once.
-- `GET /_apiproxy/admin/hosts`
-  - Requires header `X-Admin-Key`.
-  - Returns `managed_hosts`, `env_hosts`, and merged `effective_hosts`.
-- `POST /_apiproxy/admin/hosts`
-  - Requires header `X-Admin-Key`.
-  - Body: `{ "host": "api.vendor.com" }` or `{ "host": "https://api.vendor.com" }`
-  - Adds host to KV-managed allowlist.
-- `DELETE /_apiproxy/admin/hosts?host=api.vendor.com`
-  - Requires header `X-Admin-Key`.
-  - Removes host from KV-managed allowlist.
 - `GET /_apiproxy/admin/config`
   - Requires header `X-Admin-Key`.
   - Returns current config YAML (`text/yaml`).

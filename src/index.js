@@ -19,7 +19,6 @@ const KV_PROXY_KEY = "proxy_key";
 const KV_ADMIN_KEY = "admin_key";
 const KV_PROXY_KEY_OLD = "proxy_key_old";
 const KV_PROXY_KEY_OLD_EXPIRES_AT = "proxy_key_old_expires_at";
-const KV_ALLOWED_HOSTS = "allowed_hosts";
 const KV_CONFIG_YAML = "config_yaml_v1";
 const KV_CONFIG_JSON = "config_json_v1";
 const KV_ENRICHED_HEADER_PREFIX = "enriched_header:";
@@ -187,18 +186,6 @@ export default {
         await requireAdminKey(request, env);
         return await handleRotateAdmin(request, env);
       }
-      if (normalizedPath === `${ADMIN_ROOT}/hosts` && request.method === "GET") {
-        await requireAdminKey(request, env);
-        return await handleHostsGet(env);
-      }
-      if (normalizedPath === `${ADMIN_ROOT}/hosts` && request.method === "POST") {
-        await requireAdminKey(request, env);
-        return await handleHostsPost(request, env);
-      }
-      if (normalizedPath === `${ADMIN_ROOT}/hosts` && request.method === "DELETE") {
-        await requireAdminKey(request, env);
-        return await handleHostsDelete(request, env);
-      }
       if (normalizedPath === `${ADMIN_ROOT}/config` && request.method === "GET") {
         await requireAdminKey(request, env);
         return await handleConfigGet(env);
@@ -214,9 +201,6 @@ export default {
       if (normalizedPath === `${ADMIN_ROOT}/config/test-rule` && request.method === "POST") {
         await requireAdminKey(request, env);
         return await handleConfigTestRule(request, env);
-      }
-      if (normalizedPath === `${ADMIN_ROOT}/debug-ui` && request.method === "GET") {
-        return Response.redirect(new URL(`${ADMIN_ROOT}`, request.url).toString(), 302);
       }
       if (normalizedPath === `${ADMIN_ROOT}/debug` && request.method === "GET") {
         await requireAdminKey(request, env);
@@ -338,40 +322,6 @@ function getAllowedHosts(env) {
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean)
   );
-}
-
-async function getManagedAllowedHosts(env) {
-  ensureKvBinding(env);
-  const raw = await env.CONFIG.get(KV_ALLOWED_HOSTS);
-  if (!raw) return new Set();
-
-  try {
-    const arr = JSON.parse(raw);
-    if (!Array.isArray(arr)) return new Set();
-    return new Set(
-      arr
-        .map((s) => String(s).toLowerCase().trim())
-        .filter(Boolean)
-    );
-  } catch {
-    return new Set();
-  }
-}
-
-async function saveManagedAllowedHosts(env, hostsSet) {
-  const list = [...hostsSet].sort();
-  await env.CONFIG.put(KV_ALLOWED_HOSTS, JSON.stringify(list));
-}
-
-async function getEffectiveAllowedHosts(env) {
-  const envHosts = getAllowedHosts(env);
-  const managedHosts = await getManagedAllowedHosts(env);
-  if ((!envHosts || envHosts.size === 0) && managedHosts.size === 0) return null;
-
-  const merged = new Set();
-  if (envHosts) for (const h of envHosts) merged.add(h);
-  for (const h of managedHosts) merged.add(h);
-  return merged;
 }
 
 async function loadYamlApi() {
@@ -1198,7 +1148,7 @@ function assertSafeUpstreamUrl(urlLike, allowedHosts) {
       403,
       "UPSTREAM_HOST_NOT_ALLOWED",
       `Upstream host not allowlisted: ${hostname}`,
-      { allowed_hosts_hint: `Set ALLOWED_HOSTS or add via ${ADMIN_ROOT}/hosts` }
+      { allowed_hosts_hint: "Set ALLOWED_HOSTS with a comma-separated host allowlist." }
     );
   }
 
@@ -1668,57 +1618,6 @@ function handleVersion(env) {
   });
 }
 
-async function handleHostsGet(env) {
-  const managed = await getManagedAllowedHosts(env);
-  const envHosts = getAllowedHosts(env);
-  const effective = await getEffectiveAllowedHosts(env);
-  return jsonResponse(200, {
-    ok: true,
-    data: {
-      managed_hosts: [...managed].sort(),
-      env_hosts: envHosts ? [...envHosts].sort() : [],
-      effective_hosts: effective ? [...effective].sort() : [],
-    },
-    meta: {},
-  });
-}
-
-async function handleHostsPost(request, env) {
-  enforceInvokeContentType(request);
-  const body = await readJsonWithLimit(request, getEnvInt(env, "MAX_REQ_BYTES", DEFAULTS.MAX_REQ_BYTES));
-  const host = normalizeHostInput(body?.host);
-
-  const managed = await getManagedAllowedHosts(env);
-  managed.add(host);
-  await saveManagedAllowedHosts(env, managed);
-
-  return jsonResponse(200, {
-    ok: true,
-    data: { added: host, managed_hosts: [...managed].sort() },
-    meta: {},
-  });
-}
-
-async function handleHostsDelete(request, env) {
-  let host = new URL(request.url).searchParams.get("host") || "";
-  if (!host) {
-    enforceInvokeContentType(request);
-    const body = await readJsonWithLimit(request, getEnvInt(env, "MAX_REQ_BYTES", DEFAULTS.MAX_REQ_BYTES));
-    host = body?.host || "";
-  }
-  const normalized = normalizeHostInput(host);
-
-  const managed = await getManagedAllowedHosts(env);
-  managed.delete(normalized);
-  await saveManagedAllowedHosts(env, managed);
-
-  return jsonResponse(200, {
-    ok: true,
-    data: { removed: normalized, managed_hosts: [...managed].sort() },
-    meta: {},
-  });
-}
-
 async function handleConfigGet(env) {
   const yamlText = await loadConfigYamlV1(env);
   return new Response(yamlText, {
@@ -2077,36 +1976,45 @@ function handleAdminPage() {
   return new Response(
     htmlPage(
       "Admin Console",
-      `<p>Authenticate with your admin key to access proxy administration tools.</p>
+      `<div style="margin-bottom:10px;">
+         <img src="${FAVICON_DATA_URL}" width="48" height="48" alt="API Transform Proxy icon" />
+       </div>
+       <div id="saved-storage-warning" style="display:none;padding:10px 12px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:8px;margin:10px 0;">
+         ⛔️ Admin key saved on this device. Remove it when done.
+         <a href="#" id="remove-local-key-link" style="color:#991b1b;text-decoration:underline;">Remove it</a>
+       </div>
+       <p>Authenticate with your admin key to access proxy administration tools.</p>
        <div id="admin-warning" style="display:none;padding:10px 12px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:8px;margin:10px 0;"></div>
-       <div style="margin:12px 0;">
+       <div id="admin-auth" style="margin:12px 0;">
          <label for="admin-key" style="display:block;font-weight:700;margin-bottom:6px;">Admin API Key</label>
          <input id="admin-key" type="password" placeholder="paste X-Admin-Key"
            style="width:100%;max-width:560px;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;" />
          <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
            <button type="button" id="connect-btn"
              style="padding:8px 12px;border:1px solid #0f172a;border-radius:8px;background:#111827;color:#fff;cursor:pointer;">Connect</button>
-           <button type="button" id="save-key-btn"
-             style="padding:8px 12px;border:1px solid #475569;border-radius:8px;background:#fff;cursor:pointer;">Save key</button>
-           <button type="button" id="forget-key-btn"
-             style="padding:8px 12px;border:1px solid #b91c1c;border-radius:8px;background:#fff;color:#b91c1c;cursor:pointer;">Forget key</button>
-           <span id="saved-key-badge" style="display:none;font-size:12px;background:#eef2ff;border:1px solid #c7d2fe;padding:3px 8px;border-radius:999px;">Saved on this device</span>
+           <label for="save-key-local" style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;">
+             <input id="save-key-local" type="checkbox" />
+             <span>Save Admin API Key Locally (Auto Login)</span>
+           </label>
          </div>
        </div>
        <div id="admin-shell" style="display:none;">
-         <div style="display:flex;gap:8px;flex-wrap:wrap;margin:14px 0;">
-           <button type="button" class="tab-btn" data-tab="overview">Overview</button>
-           <button type="button" class="tab-btn" data-tab="debug">Debug</button>
-           <button type="button" class="tab-btn" data-tab="logging">Logging Endpoint</button>
-           <button type="button" class="tab-btn" data-tab="hosts">Hosts</button>
+         <div style="display:flex;gap:14px;align-items:flex-start;margin:14px 0;">
+         <div id="admin-nav" style="display:flex;flex-direction:column;gap:8px;min-width:220px;">
+           <button type="button" class="tab-btn" data-tab="overview">Status</button>
            <button type="button" class="tab-btn" data-tab="config">Config</button>
-           <button type="button" class="tab-btn" data-tab="headers">Enriched Headers</button>
-           <button type="button" class="tab-btn" data-tab="keys">Keys</button>
+           <button type="button" class="tab-btn" data-tab="debug">Debug</button>
+           <button type="button" class="tab-btn" data-tab="headers">Enrichments</button>
+           <button type="button" class="tab-btn" data-tab="keys">API Access Keys</button>
          </div>
+         <div style="flex:1;min-width:0;">
          <div id="tab-overview" class="tab-panel">
-           <p><b>Admin overview</b></p>
-           <pre id="overview-output" style="padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Click "Refresh overview".</pre>
-           <button type="button" id="overview-refresh-btn">Refresh overview</button>
+           <p><b>Status</b></p>
+           <p><b>Config YAML (source of truth)</b></p>
+           <pre id="overview-config-output" style="padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;max-height:280px;overflow:auto;">Click "Refresh status".</pre>
+           <p><b>Operational status (live runtime)</b></p>
+           <pre id="overview-output" style="padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Click "Refresh status".</pre>
+           <button type="button" id="overview-refresh-btn">Refresh status</button>
          </div>
          <div id="tab-debug" class="tab-panel" style="display:none;">
            <p><b>Debug controls</b></p>
@@ -2119,50 +2027,40 @@ function handleAdminPage() {
              <button type="button" id="debug-disable-btn">Disable debug</button>
              <button type="button" id="debug-load-trace-btn">Load last trace</button>
            </div>
-           <pre id="debug-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;">Debug output appears here.</pre>
-         </div>
-         <div id="tab-logging" class="tab-panel" style="display:none;">
-           <p><b>Debug logging endpoint</b></p>
+           <p style="margin-top:16px;"><b>Debug logging</b></p>
+           <label for="logging-url" style="display:block;margin:8px 0 4px;">Logging Endpoint URL</label>
            <input id="logging-url" type="text" placeholder="https://example.com/log"
              style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
+           <label for="logging-auth-header" style="display:block;margin:2px 0 4px;">Logging Auth Header (optional)</label>
            <input id="logging-auth-header" type="text" placeholder="x-api-key (optional)"
              style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
+           <label for="logging-auth-value" style="display:block;margin:2px 0 4px;">Logging Auth Value (optional)</label>
            <input id="logging-auth-value" type="password" placeholder="secret value (optional)"
              style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-             <button type="button" id="logging-save-btn">Save logging endpoint</button>
-             <button type="button" id="logging-delete-btn">Delete logging endpoint</button>
+             <button type="button" id="logging-save-btn">Save logging</button>
+             <button type="button" id="logging-delete-btn">Delete logging</button>
            </div>
-           <pre id="logging-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Logging endpoint output appears here.</pre>
-         </div>
-         <div id="tab-hosts" class="tab-panel" style="display:none;">
-           <p><b>Allowed hosts</b></p>
-           <input id="host-input" type="text" placeholder="api.vendor.com"
-             style="width:100%;max-width:420px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
-           <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
-             <button type="button" id="hosts-list-btn">List hosts</button>
-             <button type="button" id="hosts-add-btn">Add host</button>
-             <button type="button" id="hosts-delete-btn">Delete host</button>
-           </div>
-           <pre id="hosts-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Hosts output appears here.</pre>
+           <pre id="logging-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Logging output appears here.</pre>
+           <pre id="debug-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;">Debug output appears here.</pre>
          </div>
          <div id="tab-config" class="tab-panel" style="display:none;">
            <p><b>YAML config</b></p>
            <textarea id="config-yaml" rows="14"
              style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"></textarea>
+           <p id="config-validation-error" style="display:none;margin:6px 0 0;color:#b91c1c;font-size:14px;"></p>
+           <div style="margin-top:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+             <button type="button" id="config-save-btn">Save</button>
+             <a href="#" id="config-reload-link">Reload config</a>
+             <a href="#" id="config-test-rule-link">Test rule</a>
+           </div>
            <p style="margin:10px 0 6px;"><b>Test rule payload (JSON)</b></p>
            <textarea id="config-test-rule-input" rows="8"
              style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">{"sample":{"status":500,"headers":{"content-type":"application/json"},"type":"json","body":{"error":"bad"}}}</textarea>
-           <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
-             <button type="button" id="config-load-btn">Load config</button>
-             <button type="button" id="config-validate-btn">Validate config</button>
-             <button type="button" id="config-save-btn">Save config</button>
-             <button type="button" id="config-test-rule-btn">Test rule</button>
-           </div>
            <pre id="config-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Config output appears here.</pre>
          </div>
-         <div id="tab-headers" class="tab-panel" style="display:none;">
-           <p><b>Enriched headers</b></p>
+        <div id="tab-headers" class="tab-panel" style="display:none;">
+           <p><b>Enrichments</b></p>
            <input id="header-name" type="text" placeholder="authorization"
              style="width:100%;max-width:460px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
            <input id="header-value" type="password" placeholder="header secret value"
@@ -2182,11 +2080,18 @@ function handleAdminPage() {
            </div>
            <pre id="keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Rotation output appears here.</pre>
          </div>
+         </div>
+         </div>
        </div>
        <dialog id="save-key-modal" style="max-width:560px;border:1px solid #e2e8f0;border-radius:10px;padding:16px;">
          <p style="margin-top:0;"><b>Save admin key on this device?</b></p>
          <p style="margin:8px 0;">Saving this admin key stores it in this browser profile on this device.</p>
          <p style="margin:8px 0;">Anyone with access to this machine/profile can use it to view sensitive traces and modify proxy settings.</p>
+         <ul style="margin:8px 0 8px 20px;">
+           <li>Anyone with this key can change routing/config and break your proxy behavior.</li>
+           <li>Anyone with this key can view debug traces and potentially access sensitive request/response data.</li>
+           <li>Anyone with this key can rotate keys and lock out legitimate operators.</li>
+         </ul>
          <p style="margin:8px 0;">If this key is exposed, rotate it immediately.</p>
          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
            <button type="button" id="save-key-cancel-btn">Cancel</button>
@@ -2196,7 +2101,45 @@ function handleAdminPage() {
        <script>
          const ADMIN_ROOT = '${ADMIN_ROOT}';
          const ADMIN_KEY_STORAGE = 'apiproxy_admin_key_v1';
+         const DEFAULT_CONFIG_YAML_TEMPLATE = \`targetHost: null
+debug:
+  max_ttl_seconds: 3600
+  redact_headers:
+    - authorization
+    - proxy-authorization
+    - cookie
+    - set-cookie
+    - x-proxy-key
+    - x-admin-key
+  loggingEndpoint:
+    url: null
+    auth_header: null
+    auth_value: null
+transform:
+  enabled: true
+  defaultExpr: ""
+  fallback: passthrough
+  rules: []
+header_forwarding:
+  mode: blacklist
+  names:
+    - connection
+    - keep-alive
+    - proxy-authenticate
+    - proxy-authorization
+    - te
+    - trailer
+    - transfer-encoding
+    - upgrade
+    - host
+    - content-length
+    - x-proxy-key
+    - x-admin-key
+    - x-proxy-host
+    - xproxyhost
+\`;
          let currentKey = '';
+         let pendingLocalSaveApproval = false;
 
          function el(id) { return document.getElementById(id); }
          function setOutput(id, data) {
@@ -2213,30 +2156,99 @@ function handleAdminPage() {
          function readKeyInput() {
            return (el('admin-key')?.value || '').trim();
          }
+         function saveKeyChecked() {
+           return !!el('save-key-local')?.checked;
+         }
+         function setSaveKeyChecked(checked) {
+           if (el('save-key-local')) el('save-key-local').checked = !!checked;
+         }
+         function updateSavedWarning() {
+           const savedWarning = el('saved-storage-warning');
+           if (!savedWarning) return;
+           savedWarning.style.display = localStorage.getItem(ADMIN_KEY_STORAGE) ? 'block' : 'none';
+         }
+         function setConfigValidationError(message) {
+           const field = el('config-yaml');
+           const msg = el('config-validation-error');
+           const text = String(message || '').trim();
+           if (field) {
+             field.style.borderColor = text ? '#dc2626' : '#cbd5e1';
+             field.style.background = text ? '#fff5f5' : '#fff';
+           }
+           if (msg) {
+             msg.style.display = text ? 'block' : 'none';
+             msg.textContent = text;
+           }
+         }
+         function extractApiErrorText(payload, fallback) {
+           if (payload && typeof payload === 'object' && payload.error && typeof payload.error === 'object') {
+             const code = payload.error.code ? String(payload.error.code) : 'ERROR';
+             const message = payload.error.message ? String(payload.error.message) : String(fallback || 'Request failed');
+             return code + ': ' + message;
+           }
+           return String(fallback || 'Request failed');
+         }
+         function formatConfigSummary(action, payload) {
+           if (!payload || typeof payload !== 'object') {
+             return action + '\\n\\n' + String(payload ?? '');
+           }
+           if (payload.ok === true && payload.data && typeof payload.data === 'object') {
+             const lines = [action, ''];
+             if (typeof payload.data.message === 'string' && payload.data.message) {
+               lines.push('Message: ' + payload.data.message);
+             }
+             if (typeof payload.data.valid === 'boolean') {
+               lines.push('Valid: ' + (payload.data.valid ? 'yes' : 'no'));
+             }
+             if (payload.data.matched_rule !== undefined) {
+               lines.push('Matched rule: ' + (payload.data.matched_rule || 'none'));
+             }
+             if (payload.data.expression_source !== undefined) {
+               lines.push('Expression source: ' + String(payload.data.expression_source || 'none'));
+             }
+             if (payload.data.fallback_behavior !== undefined) {
+               lines.push('Fallback behavior: ' + String(payload.data.fallback_behavior));
+             }
+             if (payload.data.trace) {
+               lines.push('Trace included: yes');
+             }
+             if (payload.data.output !== undefined) {
+               lines.push('Output preview:');
+               try {
+                 lines.push(JSON.stringify(payload.data.output, null, 2));
+               } catch {
+                 lines.push(String(payload.data.output));
+               }
+             }
+             return lines.join('\\n');
+           }
+           return action + '\\n\\n' + JSON.stringify(payload, null, 2);
+         }
          function setCurrentKey(key, fromStorage) {
            currentKey = String(key || '').trim();
            const shell = el('admin-shell');
+           const auth = el('admin-auth');
            if (shell) shell.style.display = currentKey ? 'block' : 'none';
+           if (auth) auth.style.display = currentKey ? 'none' : 'block';
            if (!currentKey) {
              showWarning('');
+             updateSavedWarning();
              return;
            }
-           if (fromStorage) showWarning('Using key saved on this device. If this machine is shared, forget this key.');
-         }
-         function updateSavedBadge() {
-           const badge = el('saved-key-badge');
-           if (!badge) return;
-           badge.style.display = localStorage.getItem(ADMIN_KEY_STORAGE) ? 'inline-block' : 'none';
+           updateSavedWarning();
+           if (fromStorage) showWarning('Using key saved on this device. If this machine is shared, remove it.');
          }
          function clearSavedKey() {
            localStorage.removeItem(ADMIN_KEY_STORAGE);
-           updateSavedBadge();
+           setSaveKeyChecked(false);
+           updateSavedWarning();
          }
          function handleUnauthorized() {
            clearSavedKey();
            currentKey = '';
            if (el('admin-key')) el('admin-key').value = '';
            if (el('admin-shell')) el('admin-shell').style.display = 'none';
+           if (el('admin-auth')) el('admin-auth').style.display = 'block';
            showWarning('Admin key is invalid or expired. Re-enter X-Admin-Key.');
          }
          async function apiCall(path, method, body, expectText) {
@@ -2262,30 +2274,65 @@ function handleAdminPage() {
          function attachTabs() {
            const btns = document.querySelectorAll('.tab-btn');
            const panels = document.querySelectorAll('.tab-panel');
+           function setActiveTab(name) {
+             panels.forEach((panel) => {
+               panel.style.display = panel.id === 'tab-' + name ? 'block' : 'none';
+             });
+             btns.forEach((btn) => {
+               const active = btn.getAttribute('data-tab') === name;
+               btn.style.background = active ? '#111827' : '#fff';
+               btn.style.color = active ? '#fff' : '#0f172a';
+               btn.style.borderColor = active ? '#111827' : '#cbd5e1';
+               btn.style.fontWeight = active ? '700' : '500';
+             });
+           }
            btns.forEach((btn) => {
-             btn.style.padding = '7px 10px';
+             btn.style.padding = '8px 10px';
              btn.style.border = '1px solid #cbd5e1';
              btn.style.borderRadius = '8px';
              btn.style.background = '#fff';
+             btn.style.textAlign = 'left';
              btn.style.cursor = 'pointer';
              btn.addEventListener('click', () => {
                const name = btn.getAttribute('data-tab');
-               panels.forEach((panel) => {
-                 panel.style.display = panel.id === 'tab-' + name ? 'block' : 'none';
-               });
+               setActiveTab(name);
              });
            });
+           setActiveTab('overview');
+         }
+         function formatOverviewStatus(version, debug, headers) {
+           const versionText = version?.data?.version || 'unknown';
+           const debugData = debug?.data || {};
+           const debugEnabled = !!debugData.enabled;
+           const ttlRemaining = Number(debugData.ttl_remaining_seconds || 0);
+           const maxTtl = Number(debugData.max_ttl_seconds || 0);
+           const enrichedHeaders = Array.isArray(headers?.enriched_headers)
+             ? headers.enriched_headers
+             : (Array.isArray(headers?.data?.enriched_headers) ? headers.data.enriched_headers : []);
+           const lines = [
+             'Build Version',
+             '  - ' + versionText,
+             'Debug',
+             '  - enabled: ' + (debugEnabled ? 'yes' : 'no'),
+             '  - ttl_remaining_seconds: ' + ttlRemaining,
+             '  - max_ttl_seconds: ' + maxTtl,
+             'Enrichments',
+             '  - ' + (enrichedHeaders.length ? enrichedHeaders.join(', ') : '(none)'),
+           ];
+           return lines.join('\\n');
          }
          async function refreshOverview() {
            try {
-             const [version, debug, hosts, headers] = await Promise.all([
+             const [version, debug, headers, configYaml] = await Promise.all([
                apiCall(ADMIN_ROOT + '/version', 'GET'),
                apiCall(ADMIN_ROOT + '/debug', 'GET'),
-               apiCall(ADMIN_ROOT + '/hosts', 'GET'),
                apiCall(ADMIN_ROOT + '/headers', 'GET'),
+               apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true),
              ]);
-             setOutput('overview-output', { version, debug, hosts, headers });
+             setOutput('overview-config-output', configYaml);
+             setOutput('overview-output', formatOverviewStatus(version, debug, headers));
            } catch (e) {
+             setOutput('overview-config-output', '');
              setOutput('overview-output', String(e.message || e));
            }
          }
@@ -2324,28 +2371,17 @@ function handleAdminPage() {
            try { setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug/loggingEndpoint', 'DELETE')); }
            catch (e) { setOutput('logging-output', String(e.message || e)); }
          }
-         async function hostsList() {
-           try { setOutput('hosts-output', await apiCall(ADMIN_ROOT + '/hosts', 'GET')); }
-           catch (e) { setOutput('hosts-output', String(e.message || e)); }
-         }
-         async function hostsAdd() {
-           try { setOutput('hosts-output', await apiCall(ADMIN_ROOT + '/hosts', 'POST', { host: el('host-input')?.value?.trim() || '' })); }
-           catch (e) { setOutput('hosts-output', String(e.message || e)); }
-         }
-         async function hostsDelete() {
-           try { setOutput('hosts-output', await apiCall(ADMIN_ROOT + '/hosts', 'DELETE', { host: el('host-input')?.value?.trim() || '' })); }
-           catch (e) { setOutput('hosts-output', String(e.message || e)); }
-         }
          async function configLoad() {
            try {
              const text = await apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true);
              if (el('config-yaml')) el('config-yaml').value = text;
-             setOutput('config-output', 'Loaded current YAML config.');
+             setConfigValidationError('');
+             setOutput('config-output', 'Config reloaded from proxy.');
            } catch (e) {
-             setOutput('config-output', String(e.message || e));
+              setOutput('config-output', String(e.message || e));
            }
          }
-         async function configValidate() {
+         async function configValidate(showOutput) {
            const yaml = el('config-yaml')?.value || '';
            try {
              const res = await fetch(ADMIN_ROOT + '/config/validate', {
@@ -2358,13 +2394,35 @@ function handleAdminPage() {
                throw new Error('Unauthorized (401)');
              }
              const text = await res.text();
-             try { setOutput('config-output', JSON.parse(text)); } catch { setOutput('config-output', text); }
+             let payload = null;
+             try {
+               payload = JSON.parse(text);
+             } catch {
+               payload = null;
+             }
+             if (!res.ok) {
+               const errText = extractApiErrorText(payload, text || 'Config validation failed');
+               setConfigValidationError(errText);
+               if (showOutput) setOutput('config-output', 'Validation failed\\n\\n' + errText);
+               return false;
+             }
+             setConfigValidationError('');
+             if (showOutput) setOutput('config-output', formatConfigSummary('Validation successful', payload));
+             return true;
            } catch (e) {
-             setOutput('config-output', String(e.message || e));
+             const errText = String(e.message || e);
+             setConfigValidationError(errText);
+             if (showOutput) setOutput('config-output', 'Validation failed\\n\\n' + errText);
+             return false;
            }
          }
          async function configSave() {
            const yaml = el('config-yaml')?.value || '';
+           const valid = await configValidate(false);
+           if (!valid) {
+             setOutput('config-output', 'Save blocked: fix config validation errors first.');
+             return;
+           }
            try {
              const res = await fetch(ADMIN_ROOT + '/config', {
                method: 'PUT',
@@ -2376,7 +2434,11 @@ function handleAdminPage() {
                throw new Error('Unauthorized (401)');
              }
              const text = await res.text();
-             try { setOutput('config-output', JSON.parse(text)); } catch { setOutput('config-output', text); }
+             try {
+               setOutput('config-output', formatConfigSummary('Config saved', JSON.parse(text)));
+             } catch {
+               setOutput('config-output', text);
+             }
            } catch (e) {
              setOutput('config-output', String(e.message || e));
            }
@@ -2391,7 +2453,8 @@ function handleAdminPage() {
              return;
            }
            try {
-             setOutput('config-output', await apiCall(ADMIN_ROOT + '/config/test-rule', 'POST', parsed));
+             const result = await apiCall(ADMIN_ROOT + '/config/test-rule', 'POST', parsed);
+             setOutput('config-output', formatConfigSummary('Rule test result', result));
            } catch (e) {
              setOutput('config-output', String(e.message || e));
            }
@@ -2435,33 +2498,59 @@ function handleAdminPage() {
                showWarning('Enter an admin key first.');
                return;
              }
+             if (saveKeyChecked()) {
+               localStorage.setItem(ADMIN_KEY_STORAGE, key);
+             } else {
+               clearSavedKey();
+             }
              setCurrentKey(key);
              try {
                await refreshOverview();
                await debugRefresh();
+               await configLoad();
              } catch {
                // no-op
              }
            });
-           el('save-key-btn')?.addEventListener('click', () => {
-             const key = readKeyInput();
-             if (!key) {
-               showWarning('Enter an admin key before saving it.');
+           el('save-key-local')?.addEventListener('change', (evt) => {
+             const checked = !!evt?.target?.checked;
+             if (!checked) {
+               pendingLocalSaveApproval = false;
+               clearSavedKey();
                return;
              }
+             const key = readKeyInput();
+             if (!key) {
+               setSaveKeyChecked(false);
+               showWarning('Enter an admin key before enabling local save.');
+               return;
+             }
+             pendingLocalSaveApproval = true;
              el('save-key-modal')?.showModal();
            });
-           el('save-key-cancel-btn')?.addEventListener('click', () => el('save-key-modal')?.close());
+           el('save-key-cancel-btn')?.addEventListener('click', () => {
+             pendingLocalSaveApproval = false;
+             setSaveKeyChecked(false);
+             el('save-key-modal')?.close();
+           });
            el('save-key-confirm-btn')?.addEventListener('click', () => {
+             pendingLocalSaveApproval = false;
              const key = readKeyInput();
              if (key) localStorage.setItem(ADMIN_KEY_STORAGE, key);
-             updateSavedBadge();
+             setSaveKeyChecked(!!key);
+             updateSavedWarning();
              el('save-key-modal')?.close();
-             showWarning('Admin key saved on this device. Remove it with "Forget key" when done.');
+             showWarning('Admin key will be saved locally on connect.');
            });
-           el('forget-key-btn')?.addEventListener('click', () => {
+           el('save-key-modal')?.addEventListener('close', () => {
+             if (pendingLocalSaveApproval) {
+               setSaveKeyChecked(false);
+               pendingLocalSaveApproval = false;
+             }
+           });
+           el('remove-local-key-link')?.addEventListener('click', (evt) => {
+             evt.preventDefault();
              clearSavedKey();
-             setCurrentKey('');
              showWarning('Saved key removed.');
            });
            el('overview-refresh-btn')?.addEventListener('click', refreshOverview);
@@ -2471,26 +2560,34 @@ function handleAdminPage() {
            el('debug-load-trace-btn')?.addEventListener('click', debugLoadTrace);
            el('logging-save-btn')?.addEventListener('click', loggingSave);
            el('logging-delete-btn')?.addEventListener('click', loggingDelete);
-           el('hosts-list-btn')?.addEventListener('click', hostsList);
-           el('hosts-add-btn')?.addEventListener('click', hostsAdd);
-           el('hosts-delete-btn')?.addEventListener('click', hostsDelete);
-           el('config-load-btn')?.addEventListener('click', configLoad);
-           el('config-validate-btn')?.addEventListener('click', configValidate);
+           el('config-reload-link')?.addEventListener('click', (evt) => {
+             evt.preventDefault();
+             configLoad();
+           });
+           el('config-test-rule-link')?.addEventListener('click', (evt) => {
+             evt.preventDefault();
+             configTestRule();
+           });
            el('config-save-btn')?.addEventListener('click', configSave);
-           el('config-test-rule-btn')?.addEventListener('click', configTestRule);
+           el('config-yaml')?.addEventListener('blur', () => configValidate(false));
            el('headers-list-btn')?.addEventListener('click', headersList);
            el('headers-save-btn')?.addEventListener('click', headersSave);
            el('headers-delete-btn')?.addEventListener('click', headersDelete);
            el('rotate-proxy-btn')?.addEventListener('click', rotateProxy);
            el('rotate-admin-btn')?.addEventListener('click', rotateAdmin);
+           if (el('config-yaml') && !el('config-yaml').value.trim()) {
+             el('config-yaml').value = DEFAULT_CONFIG_YAML_TEMPLATE;
+           }
 
            const saved = localStorage.getItem(ADMIN_KEY_STORAGE);
-           updateSavedBadge();
+           updateSavedWarning();
            if (saved) {
+             setSaveKeyChecked(true);
              if (el('admin-key')) el('admin-key').value = saved;
              setCurrentKey(saved, true);
              refreshOverview();
              debugRefresh();
+             configLoad();
            }
          }
          bind();
@@ -2909,7 +3006,7 @@ async function handleRequestCore(request, env, payload, ctx) {
     });
   }
 
-  const allowedHosts = await getEffectiveAllowedHosts(env);
+  const allowedHosts = getAllowedHosts(env);
   assertSafeUpstreamUrl(upstreamUrl, allowedHosts);
 
   const method = payload.upstream.method.toUpperCase();
