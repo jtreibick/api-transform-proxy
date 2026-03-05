@@ -121,9 +121,9 @@ let yamlApi = null;
 
 const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <rect width="64" height="64" rx="14" fill="#0f172a"/>
-  <path d="M22 16c-8 7-12 16-12 16s4 9 12 16" fill="none" stroke="#e2e8f0" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M42 16c8 7 12 16 12 16s-4 9-12 16" fill="none" stroke="#e2e8f0" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M32 22l1.9 4.1 4.5.6-3.3 3.1.8 4.4-3.9-2.2-3.9 2.2.8-4.4-3.3-3.1 4.5-.6L32 22z" fill="#22d3ee"/>
+  <path d="M22 13L10 22v20l12 9" fill="none" stroke="#e2e8f0" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M42 13l12 9v20l-12 9" fill="none" stroke="#e2e8f0" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M35 8L23 32h8l-3 24 14-28h-8z" fill="#22d3ee"/>
 </svg>`;
 
 const FAVICON_DATA_URL = `data:image/svg+xml,${encodeURIComponent(FAVICON_SVG)}`;
@@ -135,10 +135,10 @@ export default {
 
     try {
       if ((normalizedPath === "/" || normalizedPath === RESERVED_ROOT) && request.method === "GET") {
-        return await handleStatusPage(env);
+        return await handleStatusPage(env, request);
       }
       if (normalizedPath === `${RESERVED_ROOT}/init` && request.method === "GET") {
-        return await handleInitPage(env);
+        return await handleInitPage(env, request);
       }
       if (normalizedPath === `${RESERVED_ROOT}/request` && request.method === "POST") {
         return await handleRequest(request, env);
@@ -1306,11 +1306,12 @@ function resolveUpstreamUrl(rawUrl, proxyHostHeader) {
   }
 }
 
-async function handleStatusPage(env) {
+async function handleStatusPage(env, request) {
   ensureKvBinding(env);
   const [proxyKey, adminKey] = await Promise.all([env.CONFIG.get(KV_PROXY_KEY), env.CONFIG.get(KV_ADMIN_KEY)]);
   const proxyInitialized = !!proxyKey;
   const adminInitialized = !!adminKey;
+  const curlExample = renderRequestCurlExample(new URL(request.url).origin);
 
   return new Response(
     htmlPage(
@@ -1323,7 +1324,8 @@ async function handleStatusPage(env) {
            : `Visit <a href="${RESERVED_ROOT}/init">${RESERVED_ROOT}/init</a> to bootstrap missing keys.`
        }</p>
        <p><b>Docs:</b> Send JSON body with <code>upstream</code> and optional <code>transform</code> to <code>POST ${RESERVED_ROOT}/request</code>.</p>
-       <p><b>Admin:</b> Use <code>${ADMIN_ROOT}/*</code> with header <code>X-Admin-Key</code>.</p>`
+       <p><b>Admin:</b> Use <code>${ADMIN_ROOT}/*</code> with header <code>X-Admin-Key</code>.</p>
+       ${curlExample}`
     ),
     { headers: { "content-type": "text/html; charset=utf-8" } }
   );
@@ -1548,11 +1550,12 @@ async function handleEnrichedHeaderDelete(env, headerNameRaw) {
   });
 }
 
-async function handleInitPage(env) {
+async function handleInitPage(env, request) {
   ensureKvBinding(env);
   const [existingProxy, existingAdmin] = await Promise.all([env.CONFIG.get(KV_PROXY_KEY), env.CONFIG.get(KV_ADMIN_KEY)]);
   let createdProxy = null;
   let createdAdmin = null;
+  const curlExample = renderRequestCurlExample(new URL(request.url).origin);
 
   if (!existingProxy) {
     createdProxy = generateSecret();
@@ -1566,10 +1569,14 @@ async function handleInitPage(env) {
   if (!createdProxy && !createdAdmin) {
     return new Response(
       htmlPage(
-        "Already initialized",
-        `<p><b>Status:</b> initialized</p>
-         <p>Proxy and admin keys already exist and are intentionally not shown again.</p>
-         <p>Use <code>POST ${ADMIN_ROOT}/rotate</code> to rotate proxy key and <code>POST ${ADMIN_ROOT}/rotate-admin</code> to rotate admin key.</p>`
+        "Proxy Already Initialized",
+        `<p>Proxy and admin keys already exist and are intentionally not shown again.</p>
+         <p><b>Important:</b> existing keys cannot be retrieved after first display.</p>
+         <p><b>How to get new API keys:</b></p>
+         <p>If you need a new requester key, use <code>POST ${ADMIN_ROOT}/rotate</code>.</p>
+         <p>If you need a new administrator key, remove keys manually in the Cloudflare control plane: open KV namespace <code>CONFIG</code>, delete <code>admin_key</code> (and optionally <code>proxy_key</code>, <code>proxy_key_old</code>, <code>proxy_key_old_expires_at</code>), then refresh <code>${RESERVED_ROOT}/init</code> to recreate keys.</p>
+         <p style="color:#6b7280;">These recovery instructions are shown only when keys already exist and are hidden.</p>
+         ${curlExample}`
       ),
       { headers: { "content-type": "text/html; charset=utf-8" } }
     );
@@ -1615,7 +1622,8 @@ async function handleInitPage(env) {
            } catch {}
          }
        </script>
-       <p><b>Next step:</b> call <code>POST ${RESERVED_ROOT}/request</code>.</p>`
+       <p><b>Next step:</b> call <code>POST ${RESERVED_ROOT}/request</code>.</p>
+       ${curlExample}`
     ),
     { headers: { "content-type": "text/html; charset=utf-8" } }
   );
@@ -1639,6 +1647,19 @@ function renderSecretField(label, value, id, note = "") {
       </div>
       ${safeNote ? `<div style="margin-top:6px;color:#6b7280;">${safeNote}</div>` : ""}
     </div>
+  `;
+}
+
+function renderRequestCurlExample(origin) {
+  const base = String(origin || "").replace(/\/+$/, "");
+  const cmd = `curl -sS "${base}${RESERVED_ROOT}/request" \\
+  -H "Content-Type: application/json" \\
+  -H "X-Proxy-Key: <YOUR_PROXY_KEY>" \\
+  -H "X-Proxy-Host: https://httpbin.org" \\
+  --data '{"upstream":{"method":"GET","url":"/json"}}'`;
+  return `
+    <h3>Test with curl</h3>
+    <pre style="padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(cmd)}</pre>
   `;
 }
 
