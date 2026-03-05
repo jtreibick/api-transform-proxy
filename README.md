@@ -12,11 +12,16 @@ Customer-self-hosted Worker that relays upstream API calls and optionally applie
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/jtreibick/api-transform-proxy)
 
-2. Open the Worker status page in your browser:
+2. Set optional bootstrap config YAML (recommended):
+- In Cloudflare dashboard: Worker -> Settings -> Variables -> add `BOOTSTRAP_CONFIG_YAML` (text), then paste your YAML config.
+- Or in Wrangler, set `BOOTSTRAP_CONFIG_YAML` under `[vars]` before deploy (example in **Required setup** below).
+- If this variable is set, it overrides stored KV config for runtime behavior.
+
+3. Open the Worker status page in your browser:
 - `https://your-worker.workers.dev/_apiproxy`
 - `https://your-worker.workers.dev/` redirects to `/_apiproxy/` (unless `X-Proxy-Key` is sent).
 
-3. Bootstrap keys in your browser (first run only):
+4. Bootstrap keys in your browser (first run only):
 - `https://your-worker.workers.dev/_apiproxy`
 - Trailing slashes are accepted on routes (for example `/_apiproxy/`).
 
@@ -25,18 +30,20 @@ Customer-self-hosted Worker that relays upstream API calls and optionally applie
   - `X-Proxy-Key`
 - Copy and store both immediately. They are shown only when created.
 
-4. Configure your API client:
+5. Configure your API client:
 - Use `X-Admin-Key` for admin endpoints under `/_apiproxy/admin/*`.
 - Use `X-Proxy-Key` for runtime requests to `/_apiproxy/request`.
 
-5. Configure behavior:
+6. Configure behavior:
 - Save YAML config through `PUT /_apiproxy/admin/config`.
 - Manage enriched upstream headers through `/_apiproxy/admin/headers`.
+- If `BOOTSTRAP_CONFIG_YAML` is set, it takes precedence over config saved through admin endpoints.
+- For deploy-time secret headers, set `BOOTSTRAP_ENRICHED_HEADERS_JSON` + a secret like `TARGET_AUTH_BEARER` (see **Required setup**).
 
-6. Send proxied requests:
+7. Send proxied requests:
 - Call `POST /_apiproxy/request` from Bubble/API client with `X-Proxy-Key`.
 
-7. Rotate keys when needed:
+8. Rotate keys when needed:
 - Proxy key: `POST /_apiproxy/admin/rotate`
 - Admin key: `POST /_apiproxy/admin/rotate-admin`
 
@@ -88,6 +95,17 @@ Notes:
 ```yaml
 targetHost: api.vendor.com # string or null
 
+debug:
+  max_ttl_seconds: 3600     # default 1 hour, max 604800 (7 days)
+  redact_headers:           # additional debug-trace header blacklist (lowercase recommended)
+    - authorization
+    - cookie
+    - x-proxy-key
+  loggingEndpoint:
+    url: null               # optional https URL for debug trace forwarding
+    auth_header: null       # optional header name for logging URL auth
+    auth_value: null        # optional header value for logging URL auth
+
 transform:
   enabled: true
   defaultExpr: ""
@@ -119,6 +137,13 @@ header_forwarding:
 
 - `CONFIG` KV binding must exist and be bound in `wrangler.toml`.
 - `jsonata` and `yaml` must be installed from `package.json` dependencies.
+- Optional: set `BOOTSTRAP_CONFIG_YAML` to define config from env. When set, it overrides KV config.
+- Optional: `debug.max_ttl_seconds` controls debug-window max duration; default `3600`, max `604800`.
+- Optional: `debug.redact_headers` lets you add header names to redact in debug traces/log forwarding.
+- Optional: set `BOOTSTRAP_ENRICHED_HEADERS_JSON` to define enriched headers from deploy config.
+  - Values support `${VAR_NAME}` placeholders.
+  - Example secret variable: `TARGET_AUTH_BEARER` (or `targetAuthBearer`).
+  - Env-managed headers are locked from `PUT/DELETE /_apiproxy/admin/headers/:name`; update env + redeploy instead.
 - Optional: set Worker variable `BUILD_VERSION` (for `GET /_apiproxy/admin/version`), e.g. a git SHA or release tag.
 - Optional: set `ALLOWED_HOSTS` as comma-separated hosts. Admin-managed hosts are stored in KV and merged with this list.
 - Optional: set `ROTATE_OVERLAP_MS` (default `600000`) to keep old proxy key valid briefly after rotation.
@@ -128,6 +153,46 @@ header_forwarding:
 ```toml
 [[kv_namespaces]]
 binding = "CONFIG"
+
+# Optional bootstrap config (when set, overrides stored KV config)
+[vars]
+BOOTSTRAP_CONFIG_YAML = """
+targetHost: null
+transform:
+  enabled: true
+  defaultExpr: ""
+  fallback: passthrough
+  rules: []
+header_forwarding:
+  mode: blacklist
+  names:
+    - connection
+    - host
+    - content-length
+    - x-proxy-key
+    - x-admin-key
+    - x-proxy-host
+    - xproxyhost
+"""
+
+# Optional deploy-time enriched headers (when set, synced to KV and env-managed)
+BOOTSTRAP_ENRICHED_HEADERS_JSON = """
+{
+  "authorization": "Bearer ${TARGET_AUTH_BEARER}"
+}
+"""
+```
+
+If you want admin API config updates (`PUT /_apiproxy/admin/config`) to take effect, unset `BOOTSTRAP_CONFIG_YAML`.
+If you want API header updates (`PUT/DELETE /_apiproxy/admin/headers/:name`) to take effect for env-managed header names, unset `BOOTSTRAP_ENRICHED_HEADERS_JSON`.
+
+Recommended: store `TARGET_AUTH_BEARER` as a Cloudflare Worker Secret (not plain text in `wrangler.toml`).
+
+Example:
+
+```bash
+wrangler secret put TARGET_AUTH_BEARER
+# then paste secret value when prompted
 ```
 
 
@@ -145,6 +210,36 @@ binding = "CONFIG"
   - Returns the deployed build version as JSON.
   - Requires header `X-Admin-Key`.
   - Uses `BUILD_VERSION` env var, defaults to `dev` if unset.
+- `GET /_apiproxy/admin`
+  - Browser admin console for all admin endpoints.
+  - Prompts for `X-Admin-Key`, then provides UI controls for debug, logging endpoint, hosts, config, enriched headers, and key rotation.
+- `GET /_apiproxy/admin/debug`
+  - Requires header `X-Admin-Key`.
+  - Returns debug status, remaining TTL, and configured `debug.max_ttl_seconds`.
+- `GET /_apiproxy/admin/debug-ui`
+  - Legacy path, redirects to `GET /_apiproxy/admin`.
+- `PUT /_apiproxy/admin/debug`
+  - Requires header `X-Admin-Key`.
+  - Requires `Content-Type: application/json`.
+  - Body:
+    - enable: `{ "enabled": true, "ttl_seconds": 3600 }`
+    - disable: `{ "enabled": false }`
+  - `ttl_seconds` must be <= `debug.max_ttl_seconds` from config.
+- `DELETE /_apiproxy/admin/debug`
+  - Requires header `X-Admin-Key`.
+  - Disables debug immediately (no request body required).
+- `GET /_apiproxy/admin/debug/last`
+  - Requires header `X-Admin-Key`.
+  - Returns most recent debug trace captured in this Worker instance.
+  - `Accept: text/plain` returns plain text trace.
+- `PUT /_apiproxy/admin/debug/loggingEndpoint`
+  - Requires header `X-Admin-Key`.
+  - Requires `Content-Type: application/json`.
+  - Updates debug logging URL config in YAML/KV.
+  - Body: `{ "loggingEndpoint": { "url": "https://...", "auth_header": "x-api-key", "auth_value": "..." } }`
+- `DELETE /_apiproxy/admin/debug/loggingEndpoint`
+  - Requires header `X-Admin-Key`.
+  - Clears debug logging endpoint URL/auth settings.
 - `POST /_apiproxy/request`
   - Requires header `X-Proxy-Key`.
   - Requires `Content-Type: application/json`.
@@ -154,6 +249,13 @@ binding = "CONFIG"
   - When host is provided by config/header, `upstream.url` may be relative (for example `/v1/customers`).
   - Forwarding behavior is config-driven by `header_forwarding.mode` + `header_forwarding.names`.
   - Enriched headers are injected last and override both forwarded incoming headers and per-request `upstream.headers`.
+  - Debug trace capture runs when both:
+    - debug window is active (`PUT /_apiproxy/admin/debug`)
+    - request header `X-Proxy-Debug: 1` is present
+  - When debug is active, response headers include:
+    - `X-Proxy-Debug: True`
+    - `X-Proxy-Debug-Trace-Id: ...`
+    - `X-Proxy-Debug-Logging-Endpoint-Status: off|ok|error:<CODE>[:HTTP_STATUS]`
   - Relays request to upstream and returns envelope:
     - success: `{ "ok": true, "data": ..., "meta": { ... } }`
     - error: `{ "error": { "code": ..., "message": ..., "details?": ... }, "meta?": { ... } }`

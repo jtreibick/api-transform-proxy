@@ -10,6 +10,9 @@
  * - GET/PUT /_apiproxy/admin/config
  * - POST /_apiproxy/admin/config/validate
  * - POST /_apiproxy/admin/config/test-rule
+ * - GET/PUT/DELETE /_apiproxy/admin/debug
+ * - GET /_apiproxy/admin/debug/last
+ * - PUT/DELETE /_apiproxy/admin/debug/loggingEndpoint
  */
 
 const KV_PROXY_KEY = "proxy_key";
@@ -20,9 +23,13 @@ const KV_ALLOWED_HOSTS = "allowed_hosts";
 const KV_CONFIG_YAML = "config_yaml_v1";
 const KV_CONFIG_JSON = "config_json_v1";
 const KV_ENRICHED_HEADER_PREFIX = "enriched_header:";
+const KV_BOOTSTRAP_ENRICHED_HEADER_NAMES = "bootstrap_enriched_header_names_v1";
+const KV_DEBUG_ENABLED_UNTIL_MS = "debug_enabled_until_ms";
 const RESERVED_ROOT = "/_apiproxy";
 const ADMIN_ROOT = `${RESERVED_ROOT}/admin`;
 const DEFAULT_DOCS_URL = "https://github.com/jtreibick/api-transform-proxy/blob/main/README.md";
+const DEBUG_MAX_TRACE_CHARS = 32000;
+const DEBUG_MAX_BODY_PREVIEW_CHARS = 4000;
 
 const DEFAULTS = {
   ALLOWED_HOSTS: "",
@@ -50,6 +57,15 @@ const EXPECTED_REQUEST_SCHEMA = {
 // Step 1 contract freeze: root config schema (YAML externally, normalized JSON internally).
 const CONFIG_SCHEMA_V1 = {
   targetHost: "string|null",
+  debug: {
+    max_ttl_seconds: "integer (1-604800)",
+    redact_headers: ["header-name"],
+    loggingEndpoint: {
+      url: "string|null",
+      auth_header: "string|null",
+      auth_value: "string|null",
+    },
+  },
   transform: {
     enabled: "boolean",
     defaultExpr: "string",
@@ -104,6 +120,15 @@ const DEFAULT_HEADER_FORWARDING_NAMES = [
 ];
 const DEFAULT_CONFIG_V1 = {
   targetHost: null,
+  debug: {
+    max_ttl_seconds: 3600,
+    redact_headers: ["authorization", "proxy-authorization", "cookie", "set-cookie", "x-proxy-key", "x-admin-key"],
+    loggingEndpoint: {
+      url: null,
+      auth_header: null,
+      auth_value: null,
+    },
+  },
   transform: {
     enabled: true,
     defaultExpr: "",
@@ -118,6 +143,7 @@ const DEFAULT_CONFIG_V1 = {
 
 let jsonataFactory = null;
 let yamlApi = null;
+let lastDebugTrace = null;
 
 const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72">
   <rect width="72" height="72" rx="16" fill="#0f172a"/>
@@ -129,14 +155,14 @@ const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="72" height="
 const FAVICON_DATA_URL = `data:image/svg+xml,${encodeURIComponent(FAVICON_SVG)}`;
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const { pathname } = new URL(request.url);
     const normalizedPath = normalizePathname(pathname);
 
     try {
       if (normalizedPath === "/" && request.method === "GET") {
         if (request.headers.get("X-Proxy-Key")) {
-          return await handleRootProxyRequest(request, env);
+          return await handleRootProxyRequest(request, env, ctx);
         }
         return Response.redirect(new URL(`${RESERVED_ROOT}/`, request.url).toString(), 302);
       }
@@ -144,7 +170,10 @@ export default {
         return await handleStatusPage(env, request);
       }
       if (normalizedPath === `${RESERVED_ROOT}/request` && request.method === "POST") {
-        return await handleRequest(request, env);
+        return await handleRequest(request, env, ctx);
+      }
+      if (normalizedPath === ADMIN_ROOT && request.method === "GET") {
+        return handleAdminPage();
       }
       if (normalizedPath === `${ADMIN_ROOT}/version` && request.method === "GET") {
         await requireAdminKey(request, env);
@@ -185,6 +214,33 @@ export default {
       if (normalizedPath === `${ADMIN_ROOT}/config/test-rule` && request.method === "POST") {
         await requireAdminKey(request, env);
         return await handleConfigTestRule(request, env);
+      }
+      if (normalizedPath === `${ADMIN_ROOT}/debug-ui` && request.method === "GET") {
+        return Response.redirect(new URL(`${ADMIN_ROOT}`, request.url).toString(), 302);
+      }
+      if (normalizedPath === `${ADMIN_ROOT}/debug` && request.method === "GET") {
+        await requireAdminKey(request, env);
+        return await handleDebugGet(env);
+      }
+      if (normalizedPath === `${ADMIN_ROOT}/debug` && request.method === "PUT") {
+        await requireAdminKey(request, env);
+        return await handleDebugPut(request, env);
+      }
+      if (normalizedPath === `${ADMIN_ROOT}/debug` && request.method === "DELETE") {
+        await requireAdminKey(request, env);
+        return await handleDebugDelete(env);
+      }
+      if (normalizedPath === `${ADMIN_ROOT}/debug/last` && request.method === "GET") {
+        await requireAdminKey(request, env);
+        return await handleDebugLastGet(request);
+      }
+      if (normalizedPath === `${ADMIN_ROOT}/debug/loggingEndpoint` && request.method === "PUT") {
+        await requireAdminKey(request, env);
+        return await handleDebugLoggingEndpointPut(request, env);
+      }
+      if (normalizedPath === `${ADMIN_ROOT}/debug/loggingEndpoint` && request.method === "DELETE") {
+        await requireAdminKey(request, env);
+        return await handleDebugLoggingEndpointDelete(env);
       }
       if (normalizedPath === `${ADMIN_ROOT}/headers` && request.method === "GET") {
         await requireAdminKey(request, env);
@@ -483,7 +539,7 @@ function validateAndNormalizeConfigV1(configInput) {
     });
   }
 
-  ensureNoUnknownKeys(input, new Set(["targetHost", "transform", "header_forwarding"]), "$", problems);
+  ensureNoUnknownKeys(input, new Set(["targetHost", "debug", "transform", "header_forwarding"]), "$", problems);
 
   const targetHostRaw = input.targetHost;
   let targetHost = null;
@@ -529,6 +585,90 @@ function validateAndNormalizeConfigV1(configInput) {
         .filter((rule) => rule !== null)
     : [];
 
+  const debugIn = input.debug ?? {};
+  if (!isNonArrayObject(debugIn)) {
+    pushProblem(problems, "$.debug", "must be an object when provided");
+  }
+  if (isNonArrayObject(debugIn)) {
+    ensureNoUnknownKeys(debugIn, new Set(["max_ttl_seconds", "redact_headers", "loggingEndpoint"]), "$.debug", problems);
+  }
+  const maxTtlSecondsRaw = isNonArrayObject(debugIn) ? debugIn.max_ttl_seconds : undefined;
+  const maxTtlSeconds = maxTtlSecondsRaw === undefined ? 3600 : Number(maxTtlSecondsRaw);
+  if (!Number.isInteger(maxTtlSeconds)) {
+    pushProblem(problems, "$.debug.max_ttl_seconds", "must be an integer");
+  } else if (maxTtlSeconds < 1 || maxTtlSeconds > 604800) {
+    pushProblem(problems, "$.debug.max_ttl_seconds", "must be between 1 and 604800 (7 days)");
+  }
+  const redactHeadersIn =
+    isNonArrayObject(debugIn) && debugIn.redact_headers !== undefined
+      ? debugIn.redact_headers
+      : DEFAULT_CONFIG_V1.debug.redact_headers;
+  if (!Array.isArray(redactHeadersIn)) {
+    pushProblem(problems, "$.debug.redact_headers", "must be an array");
+  }
+  const redactHeaders = Array.isArray(redactHeadersIn)
+    ? redactHeadersIn
+        .map((name, index) => {
+          if (typeof name !== "string") {
+            pushProblem(problems, `$.debug.redact_headers[${index}]`, "must be a string");
+            return "";
+          }
+          const normalized = normalizeHeaderName(name);
+          if (!normalized) {
+            pushProblem(problems, `$.debug.redact_headers[${index}]`, "must be non-empty");
+            return "";
+          }
+          return normalized;
+        })
+        .filter(Boolean)
+    : [...DEFAULT_CONFIG_V1.debug.redact_headers];
+  const loggingUrlIn = isNonArrayObject(debugIn) && debugIn.loggingEndpoint !== undefined ? debugIn.loggingEndpoint : {};
+  if (!isNonArrayObject(loggingUrlIn)) {
+    pushProblem(problems, "$.debug.loggingEndpoint", "must be an object when provided");
+  }
+  if (isNonArrayObject(loggingUrlIn)) {
+    ensureNoUnknownKeys(loggingUrlIn, new Set(["url", "auth_header", "auth_value"]), "$.debug.loggingEndpoint", problems);
+  }
+  const sinkUrlRaw = isNonArrayObject(loggingUrlIn) ? loggingUrlIn.url : undefined;
+  const sinkAuthHeaderRaw = isNonArrayObject(loggingUrlIn) ? loggingUrlIn.auth_header : undefined;
+  const sinkAuthValueRaw = isNonArrayObject(loggingUrlIn) ? loggingUrlIn.auth_value : undefined;
+  let sinkUrl = null;
+  if (sinkUrlRaw !== undefined && sinkUrlRaw !== null) {
+    if (typeof sinkUrlRaw !== "string" || !sinkUrlRaw.trim()) {
+      pushProblem(problems, "$.debug.loggingEndpoint.url", "must be a non-empty string or null");
+    } else {
+      sinkUrl = sinkUrlRaw.trim();
+      try {
+        const u = new URL(sinkUrl);
+        if (u.protocol !== "https:") {
+          pushProblem(problems, "$.debug.loggingEndpoint.url", "must use https");
+        }
+      } catch {
+        pushProblem(problems, "$.debug.loggingEndpoint.url", "must be a valid URL");
+      }
+    }
+  }
+  let sinkAuthHeader = null;
+  if (sinkAuthHeaderRaw !== undefined && sinkAuthHeaderRaw !== null) {
+    if (typeof sinkAuthHeaderRaw !== "string" || !sinkAuthHeaderRaw.trim()) {
+      pushProblem(problems, "$.debug.loggingEndpoint.auth_header", "must be a non-empty string or null");
+    } else {
+      try {
+        sinkAuthHeader = assertValidHeaderName(sinkAuthHeaderRaw.trim());
+      } catch {
+        pushProblem(problems, "$.debug.loggingEndpoint.auth_header", "must be a valid header name");
+      }
+    }
+  }
+  let sinkAuthValue = null;
+  if (sinkAuthValueRaw !== undefined && sinkAuthValueRaw !== null) {
+    if (typeof sinkAuthValueRaw !== "string" || !sinkAuthValueRaw.trim()) {
+      pushProblem(problems, "$.debug.loggingEndpoint.auth_value", "must be a non-empty string or null");
+    } else {
+      sinkAuthValue = sinkAuthValueRaw;
+    }
+  }
+
   const headerForwardingIn = input.header_forwarding ?? {};
   if (!isNonArrayObject(headerForwardingIn)) {
     pushProblem(problems, "$.header_forwarding", "must be an object when provided");
@@ -572,6 +712,15 @@ function validateAndNormalizeConfigV1(configInput) {
 
   return {
     targetHost,
+    debug: {
+      max_ttl_seconds: maxTtlSeconds,
+      redact_headers: [...new Set(redactHeaders)],
+      loggingEndpoint: {
+        url: sinkUrl,
+        auth_header: sinkAuthHeader,
+        auth_value: sinkAuthValue,
+      },
+    },
     transform: {
       enabled,
       defaultExpr,
@@ -608,6 +757,29 @@ async function stringifyYamlConfig(configObj) {
 
 async function loadConfigV1(env) {
   ensureKvBinding(env);
+  const bootstrapYaml = typeof env?.BOOTSTRAP_CONFIG_YAML === "string" ? env.BOOTSTRAP_CONFIG_YAML.trim() : "";
+  if (bootstrapYaml) {
+    let normalized;
+    try {
+      normalized = await parseYamlConfigText(bootstrapYaml);
+    } catch (e) {
+      if (e instanceof HttpError && e.code === "INVALID_CONFIG") {
+        throw new HttpError(
+          500,
+          "INVALID_BOOTSTRAP_CONFIG",
+          "BOOTSTRAP_CONFIG_YAML is invalid and could not be applied.",
+          e.details || null
+        );
+      }
+      throw e;
+    }
+    const [storedYaml, storedJson] = await Promise.all([env.CONFIG.get(KV_CONFIG_YAML), env.CONFIG.get(KV_CONFIG_JSON)]);
+    const normalizedJson = JSON.stringify(normalized);
+    if (storedYaml !== bootstrapYaml || storedJson !== normalizedJson) {
+      await Promise.all([env.CONFIG.put(KV_CONFIG_YAML, bootstrapYaml), env.CONFIG.put(KV_CONFIG_JSON, normalizedJson)]);
+    }
+    return normalized;
+  }
   const raw = await env.CONFIG.get(KV_CONFIG_JSON);
   if (!raw) return JSON.parse(JSON.stringify(DEFAULT_CONFIG_V1));
 
@@ -621,6 +793,10 @@ async function loadConfigV1(env) {
 
 async function loadConfigYamlV1(env) {
   ensureKvBinding(env);
+  const bootstrapYaml = typeof env?.BOOTSTRAP_CONFIG_YAML === "string" ? env.BOOTSTRAP_CONFIG_YAML.trim() : "";
+  if (bootstrapYaml) {
+    return bootstrapYaml;
+  }
   const raw = await env.CONFIG.get(KV_CONFIG_YAML);
   if (raw) return raw;
   const config = await loadConfigV1(env);
@@ -637,7 +813,120 @@ async function saveConfigFromYamlV1(yamlText, env) {
   return normalized;
 }
 
-async function listEnrichedHeaderNames(env) {
+async function saveConfigObjectV1(configObj, env) {
+  ensureKvBinding(env);
+  const normalized = validateAndNormalizeConfigV1(configObj);
+  const yamlText = await stringifyYamlConfig(normalized);
+  await Promise.all([
+    env.CONFIG.put(KV_CONFIG_YAML, yamlText),
+    env.CONFIG.put(KV_CONFIG_JSON, JSON.stringify(normalized)),
+  ]);
+  return normalized;
+}
+
+function toUpperSnakeCase(name) {
+  return String(name || "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[-\s]+/g, "_")
+    .toUpperCase();
+}
+
+function resolveTemplateVar(varName, env) {
+  const candidates = [String(varName || ""), toUpperSnakeCase(varName)];
+  for (const c of candidates) {
+    const v = env?.[c];
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  return null;
+}
+
+function resolveTemplateVars(text, env) {
+  return String(text).replace(/\$\{([A-Za-z0-9_]+)\}/g, (_m, varName) => {
+    const value = resolveTemplateVar(varName, env);
+    if (value === null) {
+      throw new HttpError(500, "MISSING_BOOTSTRAP_SECRET", "A referenced bootstrap secret variable is missing.", {
+        variable: varName,
+      });
+    }
+    return value;
+  });
+}
+
+function parseBootstrapEnrichedHeadersJson(raw, env) {
+  const input = String(raw || "").trim();
+  if (!input) return {};
+
+  let parsed;
+  try {
+    parsed = JSON.parse(input);
+  } catch (e) {
+    throw new HttpError(500, "INVALID_BOOTSTRAP_HEADERS", "BOOTSTRAP_ENRICHED_HEADERS_JSON is not valid JSON.", {
+      cause: String(e?.message || e),
+    });
+  }
+  if (!isPlainObject(parsed)) {
+    throw new HttpError(500, "INVALID_BOOTSTRAP_HEADERS", "BOOTSTRAP_ENRICHED_HEADERS_JSON must be a JSON object.");
+  }
+
+  const out = {};
+  for (const [name, value] of Object.entries(parsed)) {
+    const normalized = assertValidHeaderName(name);
+    if (typeof value !== "string") {
+      throw new HttpError(500, "INVALID_BOOTSTRAP_HEADERS", "Each bootstrap header value must be a string.", {
+        header: normalized,
+      });
+    }
+    out[normalized] = resolveTemplateVars(value, env);
+  }
+  return out;
+}
+
+function getBootstrapEnrichedHeaders(env) {
+  return parseBootstrapEnrichedHeadersJson(env?.BOOTSTRAP_ENRICHED_HEADERS_JSON, env);
+}
+
+async function syncBootstrapEnrichedHeaders(env, managedHeaders) {
+  ensureKvBinding(env);
+  const names = Object.keys(managedHeaders || {});
+  const prevRaw = await env.CONFIG.get(KV_BOOTSTRAP_ENRICHED_HEADER_NAMES);
+  let prev = [];
+  try {
+    const parsed = JSON.parse(prevRaw || "[]");
+    if (Array.isArray(parsed)) prev = parsed.map((n) => normalizeHeaderName(n)).filter(Boolean);
+  } catch {
+    prev = [];
+  }
+  const prevSet = new Set(prev);
+  const nextSet = new Set(names);
+
+  const deletes = [];
+  for (const name of prevSet) {
+    if (!nextSet.has(name)) deletes.push(env.CONFIG.delete(enrichedHeaderKvKey(name)));
+  }
+
+  const gets = await Promise.all(names.map((name) => env.CONFIG.get(enrichedHeaderKvKey(name))));
+  const puts = [];
+  for (let i = 0; i < names.length; i += 1) {
+    const name = names[i];
+    const desired = managedHeaders[name];
+    if (gets[i] !== desired) {
+      puts.push(env.CONFIG.put(enrichedHeaderKvKey(name), desired));
+    }
+  }
+
+  const prevSorted = [...prevSet].sort();
+  const nextSorted = [...nextSet].sort();
+  const namesChanged = prevSorted.length !== nextSorted.length || prevSorted.some((n, i) => n !== nextSorted[i]);
+  const ops = [...deletes, ...puts];
+  if (namesChanged) {
+    ops.push(env.CONFIG.put(KV_BOOTSTRAP_ENRICHED_HEADER_NAMES, JSON.stringify(nextSorted)));
+  }
+  if (ops.length > 0) {
+    await Promise.all(ops);
+  }
+}
+
+async function listEnrichedHeaderNames(env, managedHeaders = null) {
   ensureKvBinding(env);
   const out = [];
   let cursor = undefined;
@@ -660,11 +949,17 @@ async function listEnrichedHeaderNames(env) {
     break;
   }
 
-  return out.sort();
+  if (managedHeaders && isPlainObject(managedHeaders)) {
+    for (const name of Object.keys(managedHeaders)) out.push(name);
+  }
+
+  return [...new Set(out)].sort();
 }
 
 async function loadEnrichedHeadersMap(env) {
-  const names = await listEnrichedHeaderNames(env);
+  const managedHeaders = getBootstrapEnrichedHeaders(env);
+  await syncBootstrapEnrichedHeaders(env, managedHeaders);
+  const names = await listEnrichedHeaderNames(env, managedHeaders);
   if (names.length === 0) return {};
 
   const values = await Promise.all(names.map((name) => env.CONFIG.get(enrichedHeaderKvKey(name))));
@@ -672,6 +967,9 @@ async function loadEnrichedHeadersMap(env) {
   for (let i = 0; i < names.length; i += 1) {
     const value = values[i];
     if (typeof value === "string") out[names[i]] = value;
+  }
+  for (const [name, value] of Object.entries(managedHeaders)) {
+    out[name] = value;
   }
   return out;
 }
@@ -1135,10 +1433,19 @@ function errorEnvelope(code, message, details, meta = {}) {
   return out;
 }
 
-function jsonResponse(status, body) {
+function jsonResponse(status, body, extraHeaders = null) {
+  const headers = {
+    "content-type": "application/json; charset=utf-8",
+  };
+  if (extraHeaders && typeof extraHeaders === "object") {
+    for (const [k, v] of Object.entries(extraHeaders)) {
+      if (!k || v === undefined || v === null) continue;
+      headers[k] = String(v);
+    }
+  }
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers,
   });
 }
 
@@ -1328,14 +1635,18 @@ async function handleStatusPage(env, request) {
          "Admin API Secret (To administer this proxy)",
          "••••••••••••••••••••••••••••••••",
          "admin-api-secret-status",
-         "Existing API Key (Previously Created). This key cannot be viewed. See instructions to rotate.",
+         `API Key (Previously Created). This key cannot be viewed. See <a href="${escapeHtml(
+           keyManagementDocsUrl
+         )}" target="_blank" rel="noopener noreferrer">Rotating keys</a> to generate new keys.`,
          false
        )}
        ${renderSecretField(
-         "Requestor API Secret (To call this proxy)",
+         "Requestor API Secret (To call endpoints through this proxy)",
          "••••••••••••••••••••••••••••••••",
          "proxy-api-secret-status",
-         "Existing API Key (Previously Created). This key cannot be viewed. See instructions to rotate.",
+         `API Key (Previously Created). This key cannot be viewed. See <a href="${escapeHtml(
+           keyManagementDocsUrl
+         )}" target="_blank" rel="noopener noreferrer">Rotating keys</a> to generate new keys.`,
          false
        )}
        <p><b>How to reset keys</b><br />
@@ -1525,8 +1836,759 @@ async function handleConfigTestRule(request, env) {
   });
 }
 
+async function readDebugEnabledUntilMs(env) {
+  ensureKvBinding(env);
+  const raw = await env.CONFIG.get(KV_DEBUG_ENABLED_UNTIL_MS);
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : 0;
+}
+
+async function isDebugEnabled(env) {
+  const until = await readDebugEnabledUntilMs(env);
+  return until > Date.now();
+}
+
+function redactDebugValue(value) {
+  let text = String(value ?? "");
+  text = text.replace(/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, "Bearer ***REDACTED***");
+  text = text.replace(/(\"(?:token|secret|password|api[_-]?key|authorization)\"\s*:\s*\")([^\"]+)(\")/gi, '$1***REDACTED***$3');
+  return text;
+}
+
+function getDebugRedactHeaderSet(config) {
+  const builtIn = [
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-proxy-key",
+    "x-admin-key",
+  ];
+  const custom = Array.isArray(config?.debug?.redact_headers)
+    ? config.debug.redact_headers.map((h) => normalizeHeaderName(h)).filter(Boolean)
+    : [];
+  return new Set([...builtIn, ...custom]);
+}
+
+function toRedactedHeaderMap(headersLike, redactedHeadersSet = null) {
+  const sensitive = redactedHeadersSet || new Set([
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-proxy-key",
+    "x-admin-key",
+  ]);
+  const map = normalizeHeaderMap(headersLike);
+  const out = {};
+  for (const [k, v] of Object.entries(map)) {
+    const lk = k.toLowerCase();
+    const maybeSensitive = sensitive.has(lk) || lk.includes("token") || lk.includes("secret") || lk.includes("key");
+    out[lk] = maybeSensitive ? "***REDACTED***" : redactDebugValue(v);
+  }
+  return out;
+}
+
+function previewBodyForDebug(value) {
+  let text = "";
+  if (value === undefined || value === null) {
+    text = "";
+  } else if (typeof value === "string") {
+    text = value;
+  } else {
+    try {
+      text = JSON.stringify(value);
+    } catch {
+      text = String(value);
+    }
+  }
+  text = redactDebugValue(text);
+  if (text.length > DEBUG_MAX_BODY_PREVIEW_CHARS) {
+    return `${text.slice(0, DEBUG_MAX_BODY_PREVIEW_CHARS)}...(truncated)`;
+  }
+  return text;
+}
+
+function fmtTs(date = new Date()) {
+  return date.toISOString();
+}
+
+function sectionText(title, timestamp, lines) {
+  const body = Array.isArray(lines) ? lines.filter(Boolean).join("\n") : String(lines || "");
+  return `----- ${title} -----\nTimestamp: ${timestamp}\n${body}\n`;
+}
+
+function buildDebugTraceText(trace) {
+  const parts = [
+    sectionText("INBOUND REQUEST", trace.inbound.timestamp, [
+      `Method: ${trace.inbound.method}`,
+      `Path: ${trace.inbound.path}`,
+      `Headers: ${JSON.stringify(trace.inbound.headers, null, 2)}`,
+      `Body Preview: ${trace.inbound.body_preview}`,
+    ]),
+    sectionText("OUTBOUND REQUEST (to target)", trace.outbound.timestamp, [
+      `URL: ${trace.outbound.url}`,
+      `Method: ${trace.outbound.method}`,
+      `Headers: ${JSON.stringify(trace.outbound.headers, null, 2)}`,
+      `Body Preview: ${trace.outbound.body_preview}`,
+    ]),
+    sectionText("TARGET RESPONSE (native)", trace.target_response.timestamp, [
+      `Status: ${trace.target_response.status}`,
+      `Headers: ${JSON.stringify(trace.target_response.headers, null, 2)}`,
+      `Body Preview: ${trace.target_response.body_preview}`,
+    ]),
+    sectionText("TRANSFORM", trace.transform.timestamp, [
+      `Action: ${trace.transform.action}`,
+      `Matched Rule: ${trace.transform.matched_rule || "none"}`,
+      `Expression Source: ${trace.transform.expression_source || "none"}`,
+      `Output Preview: ${trace.transform.output_preview}`,
+    ]),
+    sectionText("FINAL RESPONSE (to requester)", trace.final_response.timestamp, [
+      `HTTP Status: ${trace.final_response.http_status}`,
+      `Body Preview: ${trace.final_response.body_preview}`,
+    ]),
+  ];
+  const text = parts.join("\n");
+  return text.length > DEBUG_MAX_TRACE_CHARS ? `${text.slice(0, DEBUG_MAX_TRACE_CHARS)}\n...(truncated)` : text;
+}
+
+async function pushDebugTraceToLoggingUrl(traceText, traceData, config) {
+  const sink = config?.debug?.loggingEndpoint || {};
+  const url = typeof sink.url === "string" ? sink.url.trim() : "";
+  if (!url) return { attempted: false, ok: true };
+  const headers = { "content-type": "application/json" };
+  if (sink.auth_header && sink.auth_value) {
+    headers[sink.auth_header] = String(sink.auth_value);
+  }
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        trace_text: traceText,
+        trace: traceData,
+      }),
+    });
+    if (!res.ok) {
+      return {
+        attempted: true,
+        ok: false,
+        error_code: "SINK_HTTP_ERROR",
+        status: res.status,
+      };
+    }
+    return { attempted: true, ok: true };
+  } catch {
+    return {
+      attempted: true,
+      ok: false,
+      error_code: "SINK_FETCH_FAILED",
+    };
+  }
+}
+
+async function handleDebugLastGet(request) {
+  const acceptsHtml = (request.headers.get("accept") || "").includes("text/html");
+  if (!lastDebugTrace) {
+    if (acceptsHtml) {
+      return new Response(
+        htmlPage("Last Debug Trace", "<p>No debug trace has been captured in this Worker instance yet.</p>"),
+        { headers: { "content-type": "text/html; charset=utf-8" } }
+      );
+    }
+    return jsonResponse(200, {
+      ok: true,
+      data: { available: false },
+      meta: {},
+    });
+  }
+  if (acceptsHtml) {
+    return new Response(
+      htmlPage(
+        "Last Debug Trace",
+        `<pre style="padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(
+          lastDebugTrace.text
+        )}</pre>`
+      ),
+      { headers: { "content-type": "text/html; charset=utf-8" } }
+    );
+  }
+  return new Response(lastDebugTrace.text, {
+    status: 200,
+    headers: { "content-type": "text/plain; charset=utf-8" },
+  });
+}
+
+async function handleDebugLoggingEndpointPut(request, env) {
+  enforceInvokeContentType(request);
+  const body = await readJsonWithLimit(request, getEnvInt(env, "MAX_REQ_BYTES", DEFAULTS.MAX_REQ_BYTES));
+  const config = await loadConfigV1(env);
+  const sinkInput = body?.loggingEndpoint || {};
+  if (!isPlainObject(sinkInput)) {
+    throw new HttpError(400, "INVALID_REQUEST", "loggingEndpoint must be an object", {
+      expected: { loggingEndpoint: { url: "https://...", auth_header: "x-api-key", auth_value: "value" } },
+    });
+  }
+  const next = JSON.parse(JSON.stringify(config));
+  next.debug = next.debug || {};
+  next.debug.loggingEndpoint = {
+    url: sinkInput.url ?? null,
+    auth_header: sinkInput.auth_header ?? null,
+    auth_value: sinkInput.auth_value ?? null,
+  };
+  const saved = await saveConfigObjectV1(next, env);
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      debug_loggingEndpoint: {
+        url: saved.debug.loggingEndpoint.url,
+        auth_header: saved.debug.loggingEndpoint.auth_header,
+        auth_value_set: !!saved.debug.loggingEndpoint.auth_value,
+      },
+    },
+    meta: {},
+  });
+}
+
+async function handleDebugLoggingEndpointDelete(env) {
+  const config = await loadConfigV1(env);
+  const next = JSON.parse(JSON.stringify(config));
+  next.debug = next.debug || {};
+  next.debug.loggingEndpoint = {
+    url: null,
+    auth_header: null,
+    auth_value: null,
+  };
+  const saved = await saveConfigObjectV1(next, env);
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      debug_loggingEndpoint: {
+        url: saved.debug.loggingEndpoint.url,
+        auth_header: saved.debug.loggingEndpoint.auth_header,
+        auth_value_set: !!saved.debug.loggingEndpoint.auth_value,
+      },
+    },
+    meta: {},
+  });
+}
+
+function handleAdminPage() {
+  return new Response(
+    htmlPage(
+      "Admin Console",
+      `<p>Authenticate with your admin key to access proxy administration tools.</p>
+       <div id="admin-warning" style="display:none;padding:10px 12px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:8px;margin:10px 0;"></div>
+       <div style="margin:12px 0;">
+         <label for="admin-key" style="display:block;font-weight:700;margin-bottom:6px;">Admin API Key</label>
+         <input id="admin-key" type="password" placeholder="paste X-Admin-Key"
+           style="width:100%;max-width:560px;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;" />
+         <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+           <button type="button" id="connect-btn"
+             style="padding:8px 12px;border:1px solid #0f172a;border-radius:8px;background:#111827;color:#fff;cursor:pointer;">Connect</button>
+           <button type="button" id="save-key-btn"
+             style="padding:8px 12px;border:1px solid #475569;border-radius:8px;background:#fff;cursor:pointer;">Save key</button>
+           <button type="button" id="forget-key-btn"
+             style="padding:8px 12px;border:1px solid #b91c1c;border-radius:8px;background:#fff;color:#b91c1c;cursor:pointer;">Forget key</button>
+           <span id="saved-key-badge" style="display:none;font-size:12px;background:#eef2ff;border:1px solid #c7d2fe;padding:3px 8px;border-radius:999px;">Saved on this device</span>
+         </div>
+       </div>
+       <div id="admin-shell" style="display:none;">
+         <div style="display:flex;gap:8px;flex-wrap:wrap;margin:14px 0;">
+           <button type="button" class="tab-btn" data-tab="overview">Overview</button>
+           <button type="button" class="tab-btn" data-tab="debug">Debug</button>
+           <button type="button" class="tab-btn" data-tab="logging">Logging Endpoint</button>
+           <button type="button" class="tab-btn" data-tab="hosts">Hosts</button>
+           <button type="button" class="tab-btn" data-tab="config">Config</button>
+           <button type="button" class="tab-btn" data-tab="headers">Enriched Headers</button>
+           <button type="button" class="tab-btn" data-tab="keys">Keys</button>
+         </div>
+         <div id="tab-overview" class="tab-panel">
+           <p><b>Admin overview</b></p>
+           <pre id="overview-output" style="padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Click "Refresh overview".</pre>
+           <button type="button" id="overview-refresh-btn">Refresh overview</button>
+         </div>
+         <div id="tab-debug" class="tab-panel" style="display:none;">
+           <p><b>Debug controls</b></p>
+           <label for="ttl-seconds" style="display:block;margin:8px 0 6px;">TTL seconds</label>
+           <input id="ttl-seconds" type="number" min="1" step="1" value="3600"
+             style="width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+           <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+             <button type="button" id="debug-refresh-btn">Refresh status</button>
+             <button type="button" id="debug-enable-btn">Enable debug</button>
+             <button type="button" id="debug-disable-btn">Disable debug</button>
+             <button type="button" id="debug-load-trace-btn">Load last trace</button>
+           </div>
+           <pre id="debug-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;">Debug output appears here.</pre>
+         </div>
+         <div id="tab-logging" class="tab-panel" style="display:none;">
+           <p><b>Debug logging endpoint</b></p>
+           <input id="logging-url" type="text" placeholder="https://example.com/log"
+             style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
+           <input id="logging-auth-header" type="text" placeholder="x-api-key (optional)"
+             style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
+           <input id="logging-auth-value" type="password" placeholder="secret value (optional)"
+             style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
+           <div style="display:flex;gap:8px;flex-wrap:wrap;">
+             <button type="button" id="logging-save-btn">Save logging endpoint</button>
+             <button type="button" id="logging-delete-btn">Delete logging endpoint</button>
+           </div>
+           <pre id="logging-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Logging endpoint output appears here.</pre>
+         </div>
+         <div id="tab-hosts" class="tab-panel" style="display:none;">
+           <p><b>Allowed hosts</b></p>
+           <input id="host-input" type="text" placeholder="api.vendor.com"
+             style="width:100%;max-width:420px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+           <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+             <button type="button" id="hosts-list-btn">List hosts</button>
+             <button type="button" id="hosts-add-btn">Add host</button>
+             <button type="button" id="hosts-delete-btn">Delete host</button>
+           </div>
+           <pre id="hosts-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Hosts output appears here.</pre>
+         </div>
+         <div id="tab-config" class="tab-panel" style="display:none;">
+           <p><b>YAML config</b></p>
+           <textarea id="config-yaml" rows="14"
+             style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"></textarea>
+           <p style="margin:10px 0 6px;"><b>Test rule payload (JSON)</b></p>
+           <textarea id="config-test-rule-input" rows="8"
+             style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">{"sample":{"status":500,"headers":{"content-type":"application/json"},"type":"json","body":{"error":"bad"}}}</textarea>
+           <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+             <button type="button" id="config-load-btn">Load config</button>
+             <button type="button" id="config-validate-btn">Validate config</button>
+             <button type="button" id="config-save-btn">Save config</button>
+             <button type="button" id="config-test-rule-btn">Test rule</button>
+           </div>
+           <pre id="config-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Config output appears here.</pre>
+         </div>
+         <div id="tab-headers" class="tab-panel" style="display:none;">
+           <p><b>Enriched headers</b></p>
+           <input id="header-name" type="text" placeholder="authorization"
+             style="width:100%;max-width:460px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
+           <input id="header-value" type="password" placeholder="header secret value"
+             style="width:100%;max-width:460px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
+           <div style="display:flex;gap:8px;flex-wrap:wrap;">
+             <button type="button" id="headers-list-btn">List headers</button>
+             <button type="button" id="headers-save-btn">Set header</button>
+             <button type="button" id="headers-delete-btn">Delete header</button>
+           </div>
+           <pre id="headers-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Header output appears here.</pre>
+         </div>
+         <div id="tab-keys" class="tab-panel" style="display:none;">
+           <p><b>Key rotation</b></p>
+           <div style="display:flex;gap:8px;flex-wrap:wrap;">
+             <button type="button" id="rotate-proxy-btn">Rotate proxy key</button>
+             <button type="button" id="rotate-admin-btn">Rotate admin key</button>
+           </div>
+           <pre id="keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Rotation output appears here.</pre>
+         </div>
+       </div>
+       <dialog id="save-key-modal" style="max-width:560px;border:1px solid #e2e8f0;border-radius:10px;padding:16px;">
+         <p style="margin-top:0;"><b>Save admin key on this device?</b></p>
+         <p style="margin:8px 0;">Saving this admin key stores it in this browser profile on this device.</p>
+         <p style="margin:8px 0;">Anyone with access to this machine/profile can use it to view sensitive traces and modify proxy settings.</p>
+         <p style="margin:8px 0;">If this key is exposed, rotate it immediately.</p>
+         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
+           <button type="button" id="save-key-cancel-btn">Cancel</button>
+           <button type="button" id="save-key-confirm-btn">I Understand, Save</button>
+         </div>
+       </dialog>
+       <script>
+         const ADMIN_ROOT = '${ADMIN_ROOT}';
+         const ADMIN_KEY_STORAGE = 'apiproxy_admin_key_v1';
+         let currentKey = '';
+
+         function el(id) { return document.getElementById(id); }
+         function setOutput(id, data) {
+           const node = el(id);
+           if (!node) return;
+           node.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+         }
+         function showWarning(message) {
+           const node = el('admin-warning');
+           if (!node) return;
+           node.textContent = message || '';
+           node.style.display = message ? 'block' : 'none';
+         }
+         function readKeyInput() {
+           return (el('admin-key')?.value || '').trim();
+         }
+         function setCurrentKey(key, fromStorage) {
+           currentKey = String(key || '').trim();
+           const shell = el('admin-shell');
+           if (shell) shell.style.display = currentKey ? 'block' : 'none';
+           if (!currentKey) {
+             showWarning('');
+             return;
+           }
+           if (fromStorage) showWarning('Using key saved on this device. If this machine is shared, forget this key.');
+         }
+         function updateSavedBadge() {
+           const badge = el('saved-key-badge');
+           if (!badge) return;
+           badge.style.display = localStorage.getItem(ADMIN_KEY_STORAGE) ? 'inline-block' : 'none';
+         }
+         function clearSavedKey() {
+           localStorage.removeItem(ADMIN_KEY_STORAGE);
+           updateSavedBadge();
+         }
+         function handleUnauthorized() {
+           clearSavedKey();
+           currentKey = '';
+           if (el('admin-key')) el('admin-key').value = '';
+           if (el('admin-shell')) el('admin-shell').style.display = 'none';
+           showWarning('Admin key is invalid or expired. Re-enter X-Admin-Key.');
+         }
+         async function apiCall(path, method, body, expectText) {
+           if (!currentKey) {
+             throw new Error('Provide an Admin API Key first.');
+           }
+           const headers = { 'X-Admin-Key': currentKey };
+           if (body !== undefined && !expectText) headers['Content-Type'] = 'application/json';
+           if (expectText) headers['Accept'] = 'text/plain';
+           const res = await fetch(path, {
+             method,
+             headers,
+             body: body === undefined ? undefined : (expectText ? body : JSON.stringify(body)),
+           });
+           if (res.status === 401) {
+             handleUnauthorized();
+             throw new Error('Unauthorized (401)');
+           }
+           const text = await res.text();
+           if (expectText) return text;
+           try { return JSON.parse(text); } catch { return text; }
+         }
+         function attachTabs() {
+           const btns = document.querySelectorAll('.tab-btn');
+           const panels = document.querySelectorAll('.tab-panel');
+           btns.forEach((btn) => {
+             btn.style.padding = '7px 10px';
+             btn.style.border = '1px solid #cbd5e1';
+             btn.style.borderRadius = '8px';
+             btn.style.background = '#fff';
+             btn.style.cursor = 'pointer';
+             btn.addEventListener('click', () => {
+               const name = btn.getAttribute('data-tab');
+               panels.forEach((panel) => {
+                 panel.style.display = panel.id === 'tab-' + name ? 'block' : 'none';
+               });
+             });
+           });
+         }
+         async function refreshOverview() {
+           try {
+             const [version, debug, hosts, headers] = await Promise.all([
+               apiCall(ADMIN_ROOT + '/version', 'GET'),
+               apiCall(ADMIN_ROOT + '/debug', 'GET'),
+               apiCall(ADMIN_ROOT + '/hosts', 'GET'),
+               apiCall(ADMIN_ROOT + '/headers', 'GET'),
+             ]);
+             setOutput('overview-output', { version, debug, hosts, headers });
+           } catch (e) {
+             setOutput('overview-output', String(e.message || e));
+           }
+         }
+         async function debugRefresh() {
+           try { setOutput('debug-output', await apiCall(ADMIN_ROOT + '/debug', 'GET')); }
+           catch (e) { setOutput('debug-output', String(e.message || e)); }
+         }
+         async function debugEnable() {
+           const ttl = Number(el('ttl-seconds')?.value || 0);
+           try { setOutput('debug-output', await apiCall(ADMIN_ROOT + '/debug', 'PUT', { enabled: true, ttl_seconds: ttl })); }
+           catch (e) { setOutput('debug-output', String(e.message || e)); }
+         }
+         async function debugDisable() {
+           try { setOutput('debug-output', await apiCall(ADMIN_ROOT + '/debug', 'DELETE')); }
+           catch (e) { setOutput('debug-output', String(e.message || e)); }
+         }
+         async function debugLoadTrace() {
+           try { setOutput('debug-output', await apiCall(ADMIN_ROOT + '/debug/last', 'GET', undefined, true)); }
+           catch (e) { setOutput('debug-output', String(e.message || e)); }
+         }
+         async function loggingSave() {
+           try {
+             const payload = {
+               loggingEndpoint: {
+                 url: el('logging-url')?.value?.trim() || null,
+                 auth_header: el('logging-auth-header')?.value?.trim() || null,
+                 auth_value: el('logging-auth-value')?.value || null,
+               },
+             };
+             setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug/loggingEndpoint', 'PUT', payload));
+           } catch (e) {
+             setOutput('logging-output', String(e.message || e));
+           }
+         }
+         async function loggingDelete() {
+           try { setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug/loggingEndpoint', 'DELETE')); }
+           catch (e) { setOutput('logging-output', String(e.message || e)); }
+         }
+         async function hostsList() {
+           try { setOutput('hosts-output', await apiCall(ADMIN_ROOT + '/hosts', 'GET')); }
+           catch (e) { setOutput('hosts-output', String(e.message || e)); }
+         }
+         async function hostsAdd() {
+           try { setOutput('hosts-output', await apiCall(ADMIN_ROOT + '/hosts', 'POST', { host: el('host-input')?.value?.trim() || '' })); }
+           catch (e) { setOutput('hosts-output', String(e.message || e)); }
+         }
+         async function hostsDelete() {
+           try { setOutput('hosts-output', await apiCall(ADMIN_ROOT + '/hosts', 'DELETE', { host: el('host-input')?.value?.trim() || '' })); }
+           catch (e) { setOutput('hosts-output', String(e.message || e)); }
+         }
+         async function configLoad() {
+           try {
+             const text = await apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true);
+             if (el('config-yaml')) el('config-yaml').value = text;
+             setOutput('config-output', 'Loaded current YAML config.');
+           } catch (e) {
+             setOutput('config-output', String(e.message || e));
+           }
+         }
+         async function configValidate() {
+           const yaml = el('config-yaml')?.value || '';
+           try {
+             const res = await fetch(ADMIN_ROOT + '/config/validate', {
+               method: 'POST',
+               headers: { 'X-Admin-Key': currentKey, 'Content-Type': 'text/yaml' },
+               body: yaml,
+             });
+             if (res.status === 401) {
+               handleUnauthorized();
+               throw new Error('Unauthorized (401)');
+             }
+             const text = await res.text();
+             try { setOutput('config-output', JSON.parse(text)); } catch { setOutput('config-output', text); }
+           } catch (e) {
+             setOutput('config-output', String(e.message || e));
+           }
+         }
+         async function configSave() {
+           const yaml = el('config-yaml')?.value || '';
+           try {
+             const res = await fetch(ADMIN_ROOT + '/config', {
+               method: 'PUT',
+               headers: { 'X-Admin-Key': currentKey, 'Content-Type': 'text/yaml' },
+               body: yaml,
+             });
+             if (res.status === 401) {
+               handleUnauthorized();
+               throw new Error('Unauthorized (401)');
+             }
+             const text = await res.text();
+             try { setOutput('config-output', JSON.parse(text)); } catch { setOutput('config-output', text); }
+           } catch (e) {
+             setOutput('config-output', String(e.message || e));
+           }
+         }
+         async function configTestRule() {
+           const raw = el('config-test-rule-input')?.value || '';
+           let parsed;
+           try {
+             parsed = raw ? JSON.parse(raw) : {};
+           } catch {
+             setOutput('config-output', 'Test rule input must be valid JSON.');
+             return;
+           }
+           try {
+             setOutput('config-output', await apiCall(ADMIN_ROOT + '/config/test-rule', 'POST', parsed));
+           } catch (e) {
+             setOutput('config-output', String(e.message || e));
+           }
+         }
+         async function headersList() {
+           try { setOutput('headers-output', await apiCall(ADMIN_ROOT + '/headers', 'GET')); }
+           catch (e) { setOutput('headers-output', String(e.message || e)); }
+         }
+         async function headersSave() {
+           const name = (el('header-name')?.value || '').trim();
+           const value = el('header-value')?.value || '';
+           try { setOutput('headers-output', await apiCall(ADMIN_ROOT + '/headers/' + encodeURIComponent(name), 'PUT', { value })); }
+           catch (e) { setOutput('headers-output', String(e.message || e)); }
+         }
+         async function headersDelete() {
+           const name = (el('header-name')?.value || '').trim();
+           try { setOutput('headers-output', await apiCall(ADMIN_ROOT + '/headers/' + encodeURIComponent(name), 'DELETE')); }
+           catch (e) { setOutput('headers-output', String(e.message || e)); }
+         }
+         async function rotateProxy() {
+           try { setOutput('keys-output', await apiCall(ADMIN_ROOT + '/rotate', 'POST')); }
+           catch (e) { setOutput('keys-output', String(e.message || e)); }
+         }
+         async function rotateAdmin() {
+           try {
+             const out = await apiCall(ADMIN_ROOT + '/rotate-admin', 'POST');
+             setOutput('keys-output', out);
+             clearSavedKey();
+             setCurrentKey('');
+             showWarning('Admin key rotated. Re-enter the new admin key from response.');
+           } catch (e) {
+             setOutput('keys-output', String(e.message || e));
+           }
+         }
+
+         function bind() {
+           attachTabs();
+           el('connect-btn')?.addEventListener('click', async () => {
+             const key = readKeyInput();
+             if (!key) {
+               showWarning('Enter an admin key first.');
+               return;
+             }
+             setCurrentKey(key);
+             try {
+               await refreshOverview();
+               await debugRefresh();
+             } catch {
+               // no-op
+             }
+           });
+           el('save-key-btn')?.addEventListener('click', () => {
+             const key = readKeyInput();
+             if (!key) {
+               showWarning('Enter an admin key before saving it.');
+               return;
+             }
+             el('save-key-modal')?.showModal();
+           });
+           el('save-key-cancel-btn')?.addEventListener('click', () => el('save-key-modal')?.close());
+           el('save-key-confirm-btn')?.addEventListener('click', () => {
+             const key = readKeyInput();
+             if (key) localStorage.setItem(ADMIN_KEY_STORAGE, key);
+             updateSavedBadge();
+             el('save-key-modal')?.close();
+             showWarning('Admin key saved on this device. Remove it with "Forget key" when done.');
+           });
+           el('forget-key-btn')?.addEventListener('click', () => {
+             clearSavedKey();
+             setCurrentKey('');
+             showWarning('Saved key removed.');
+           });
+           el('overview-refresh-btn')?.addEventListener('click', refreshOverview);
+           el('debug-refresh-btn')?.addEventListener('click', debugRefresh);
+           el('debug-enable-btn')?.addEventListener('click', debugEnable);
+           el('debug-disable-btn')?.addEventListener('click', debugDisable);
+           el('debug-load-trace-btn')?.addEventListener('click', debugLoadTrace);
+           el('logging-save-btn')?.addEventListener('click', loggingSave);
+           el('logging-delete-btn')?.addEventListener('click', loggingDelete);
+           el('hosts-list-btn')?.addEventListener('click', hostsList);
+           el('hosts-add-btn')?.addEventListener('click', hostsAdd);
+           el('hosts-delete-btn')?.addEventListener('click', hostsDelete);
+           el('config-load-btn')?.addEventListener('click', configLoad);
+           el('config-validate-btn')?.addEventListener('click', configValidate);
+           el('config-save-btn')?.addEventListener('click', configSave);
+           el('config-test-rule-btn')?.addEventListener('click', configTestRule);
+           el('headers-list-btn')?.addEventListener('click', headersList);
+           el('headers-save-btn')?.addEventListener('click', headersSave);
+           el('headers-delete-btn')?.addEventListener('click', headersDelete);
+           el('rotate-proxy-btn')?.addEventListener('click', rotateProxy);
+           el('rotate-admin-btn')?.addEventListener('click', rotateAdmin);
+
+           const saved = localStorage.getItem(ADMIN_KEY_STORAGE);
+           updateSavedBadge();
+           if (saved) {
+             if (el('admin-key')) el('admin-key').value = saved;
+             setCurrentKey(saved, true);
+             refreshOverview();
+             debugRefresh();
+           }
+         }
+         bind();
+       </script>`
+    ),
+    { headers: { "content-type": "text/html; charset=utf-8" } }
+  );
+}
+
+async function handleDebugGet(env) {
+  const config = await loadConfigV1(env);
+  const maxTtlSeconds = Number(config?.debug?.max_ttl_seconds || 3600);
+  const enabledUntilMs = await readDebugEnabledUntilMs(env);
+  const now = Date.now();
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      enabled: enabledUntilMs > now,
+      enabled_until_ms: enabledUntilMs || 0,
+      ttl_remaining_seconds: enabledUntilMs > now ? Math.ceil((enabledUntilMs - now) / 1000) : 0,
+      max_ttl_seconds: maxTtlSeconds,
+    },
+    meta: {},
+  });
+}
+
+async function handleDebugPut(request, env) {
+  enforceInvokeContentType(request);
+  const body = await readJsonWithLimit(request, getEnvInt(env, "MAX_REQ_BYTES", DEFAULTS.MAX_REQ_BYTES));
+  const enabled = body?.enabled;
+  if (typeof enabled !== "boolean") {
+    throw new HttpError(400, "INVALID_REQUEST", "enabled is required and must be a boolean", {
+      expected: { enabled: true, ttl_seconds: 3600 },
+    });
+  }
+
+  const config = await loadConfigV1(env);
+  const maxTtlSeconds = Number(config?.debug?.max_ttl_seconds || 3600);
+
+  if (!enabled) {
+    await env.CONFIG.put(KV_DEBUG_ENABLED_UNTIL_MS, "0");
+    return jsonResponse(200, {
+      ok: true,
+      data: {
+        enabled: false,
+        enabled_until_ms: 0,
+        ttl_remaining_seconds: 0,
+        max_ttl_seconds: maxTtlSeconds,
+      },
+      meta: {},
+    });
+  }
+
+  const ttlSecondsRaw = body?.ttl_seconds === undefined ? maxTtlSeconds : Number(body.ttl_seconds);
+  if (!Number.isInteger(ttlSecondsRaw) || ttlSecondsRaw < 1) {
+    throw new HttpError(400, "INVALID_REQUEST", "ttl_seconds must be a positive integer", {
+      expected: { enabled: true, ttl_seconds: 3600 },
+    });
+  }
+  if (ttlSecondsRaw > maxTtlSeconds) {
+    throw new HttpError(400, "INVALID_REQUEST", "ttl_seconds exceeds configured debug.max_ttl_seconds", {
+      received: ttlSecondsRaw,
+      max_ttl_seconds: maxTtlSeconds,
+    });
+  }
+
+  const enabledUntilMs = Date.now() + ttlSecondsRaw * 1000;
+  await env.CONFIG.put(KV_DEBUG_ENABLED_UNTIL_MS, String(enabledUntilMs));
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      enabled: true,
+      enabled_until_ms: enabledUntilMs,
+      ttl_remaining_seconds: ttlSecondsRaw,
+      max_ttl_seconds: maxTtlSeconds,
+    },
+    meta: {},
+  });
+}
+
+async function handleDebugDelete(env) {
+  await env.CONFIG.put(KV_DEBUG_ENABLED_UNTIL_MS, "0");
+  const config = await loadConfigV1(env);
+  const maxTtlSeconds = Number(config?.debug?.max_ttl_seconds || 3600);
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      enabled: false,
+      enabled_until_ms: 0,
+      ttl_remaining_seconds: 0,
+      max_ttl_seconds: maxTtlSeconds,
+    },
+    meta: {},
+  });
+}
+
 async function handleEnrichedHeadersList(env) {
-  const names = await listEnrichedHeaderNames(env);
+  const names = await listEnrichedHeaderNames(env, getBootstrapEnrichedHeaders(env));
   return jsonResponse(200, {
     enriched_headers: names,
   });
@@ -1535,6 +2597,13 @@ async function handleEnrichedHeadersList(env) {
 async function handleEnrichedHeaderPut(request, env, headerNameRaw) {
   enforceInvokeContentType(request);
   const headerName = assertValidHeaderName(headerNameRaw);
+  const managedHeaders = getBootstrapEnrichedHeaders(env);
+  if (Object.prototype.hasOwnProperty.call(managedHeaders, headerName)) {
+    throw new HttpError(409, "HEADER_MANAGED_BY_ENV", "Header is managed by BOOTSTRAP_ENRICHED_HEADERS_JSON and cannot be changed via API.", {
+      header: headerName,
+      hint: "Update BOOTSTRAP_ENRICHED_HEADERS_JSON and redeploy.",
+    });
+  }
   const body = await readJsonWithLimit(request, getEnvInt(env, "MAX_REQ_BYTES", DEFAULTS.MAX_REQ_BYTES));
   const value = body?.value;
   if (typeof value !== "string" || !value.length) {
@@ -1544,7 +2613,7 @@ async function handleEnrichedHeaderPut(request, env, headerNameRaw) {
   }
 
   await env.CONFIG.put(enrichedHeaderKvKey(headerName), value);
-  const names = await listEnrichedHeaderNames(env);
+  const names = await listEnrichedHeaderNames(env, managedHeaders);
   return jsonResponse(200, {
     enriched_headers: names,
   });
@@ -1552,6 +2621,13 @@ async function handleEnrichedHeaderPut(request, env, headerNameRaw) {
 
 async function handleEnrichedHeaderDelete(env, headerNameRaw) {
   const headerName = assertValidHeaderName(headerNameRaw);
+  const managedHeaders = getBootstrapEnrichedHeaders(env);
+  if (Object.prototype.hasOwnProperty.call(managedHeaders, headerName)) {
+    throw new HttpError(409, "HEADER_MANAGED_BY_ENV", "Header is managed by BOOTSTRAP_ENRICHED_HEADERS_JSON and cannot be deleted via API.", {
+      header: headerName,
+      hint: "Update BOOTSTRAP_ENRICHED_HEADERS_JSON and redeploy.",
+    });
+  }
   const kvKey = enrichedHeaderKvKey(headerName);
   const existing = await env.CONFIG.get(kvKey);
   if (!existing) {
@@ -1561,7 +2637,7 @@ async function handleEnrichedHeaderDelete(env, headerNameRaw) {
     });
   }
   await env.CONFIG.delete(kvKey);
-  const names = await listEnrichedHeaderNames(env);
+  const names = await listEnrichedHeaderNames(env, managedHeaders);
   return jsonResponse(200, {
     enriched_headers: names,
   });
@@ -1609,26 +2685,26 @@ async function handleInitPage(env, request) {
          <div style="font-weight:700;">Save these API keys now</div>
          <div style="font-size:13px;">This is the only time they will be visible. Store them securely before leaving this page.</div>
        </div>
-       <p style="color:#b91c1c;font-weight:700;margin:0 0 8px 0;">Copy these keys.</p>
-       <p><b>
-         These API secrets will only be displayed on this page one time. Please copy and store them safely.
-       </b></p>
        ${renderSecretField(
          "Admin API Secret (To administer this proxy)",
          createdAdmin || "••••••••••••••••••••••••••••••••",
          "admin-api-secret",
          createdAdmin
-           ? "Generated API Key (New). Copy to a safe place. This key cannot be viewed more than once."
-           : "Existing API Key (Previously Created). This key cannot be viewed. See instructions to rotate.",
+           ? "API Key (New). Copy to a safe place. This key cannot be viewed more than once."
+           : `API Key (Previously Created). This key cannot be viewed. See <a href="${escapeHtml(
+               keyManagementDocsUrl
+             )}" target="_blank" rel="noopener noreferrer">Rotating keys</a> to generate new keys.`,
          !!createdAdmin
        )}
        ${renderSecretField(
-         "Requestor API Secret (To call this proxy)",
+         "Requestor API Secret (To call endpoints through this proxy)",
          createdProxy || "••••••••••••••••••••••••••••••••",
          "requestor-api-secret",
          createdProxy
-           ? "Generated API Key (New). Copy to a safe place. This key cannot be viewed more than once."
-           : "Existing API Key (Previously Created). This key cannot be viewed. See instructions to rotate.",
+           ? "API Key (New). Copy to a safe place. This key cannot be viewed more than once."
+           : `API Key (Previously Created). This key cannot be viewed. See <a href="${escapeHtml(
+               keyManagementDocsUrl
+             )}" target="_blank" rel="noopener noreferrer">Rotating keys</a> to generate new keys.`,
          !!createdProxy
        )}
        <p><b>How to reset keys</b><br />
@@ -1645,7 +2721,7 @@ function renderSecretField(label, value, id, note = "", actionsEnabled = true) {
   const safeLabel = escapeHtml(label);
   const safeValue = escapeHtml(value);
   const safeId = escapeHtml(id);
-  const safeNote = escapeHtml(note || "");
+  const noteHtml = String(note || "");
   const disabledAttr = actionsEnabled ? "" : " disabled";
   const buttonStyle = actionsEnabled
     ? "padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;cursor:pointer;"
@@ -1661,7 +2737,7 @@ function renderSecretField(label, value, id, note = "", actionsEnabled = true) {
         <button type="button" data-copy-for="${safeId}" onclick="copySecret('${safeId}')"
           style="${buttonStyle}"${disabledAttr}>Copy</button>
       </div>
-      ${safeNote ? `<div style="margin-top:6px;color:#6b7280;font-size:12px;">${safeNote}</div>` : ""}
+      ${noteHtml ? `<div style="margin-top:6px;color:#6b7280;font-size:12px;">${noteHtml}</div>` : ""}
     </div>
   `;
 }
@@ -1764,7 +2840,7 @@ async function handleRotateAdmin(request, env) {
   });
 }
 
-async function handleRootProxyRequest(request, env) {
+async function handleRootProxyRequest(request, env, ctx) {
   await requireProxyKey(request, env);
   const search = new URL(request.url).search || "";
   const payload = {
@@ -1773,10 +2849,10 @@ async function handleRootProxyRequest(request, env) {
       url: `/${search}`,
     },
   };
-  return handleRequestCore(request, env, payload);
+  return handleRequestCore(request, env, payload, ctx);
 }
 
-async function handleRequest(request, env) {
+async function handleRequest(request, env, ctx) {
   await requireProxyKey(request, env);
   enforceInvokeContentType(request);
 
@@ -1790,15 +2866,34 @@ async function handleRequest(request, env) {
       received: truncateJsonSnippet(payload),
     });
   }
-  return handleRequestCore(request, env, payload);
+  return handleRequestCore(request, env, payload, ctx);
 }
 
-async function handleRequestCore(request, env, payload) {
+async function handleRequestCore(request, env, payload, ctx) {
   const maxResp = getEnvInt(env, "MAX_RESP_BYTES", DEFAULTS.MAX_RESP_BYTES);
   const maxExpr = getEnvInt(env, "MAX_EXPR_BYTES", DEFAULTS.MAX_EXPR_BYTES);
   const transformTimeoutMs = getEnvInt(env, "TRANSFORM_TIMEOUT_MS", DEFAULTS.TRANSFORM_TIMEOUT_MS);
 
   const config = await loadConfigV1(env);
+  const redactHeaderSet = getDebugRedactHeaderSet(config);
+  const debugRequested = String(request.headers.get("X-Proxy-Debug") || "").trim() === "1";
+  const debugActive = debugRequested ? await isDebugEnabled(env) : false;
+  const debugTrace = debugActive
+    ? {
+        id: generateSecret().slice(0, 16),
+        inbound: {
+          timestamp: fmtTs(),
+          method: request.method,
+          path: new URL(request.url).pathname + new URL(request.url).search,
+          headers: toRedactedHeaderMap(request.headers, redactHeaderSet),
+          body_preview: previewBodyForDebug(payload),
+        },
+        outbound: null,
+        target_response: null,
+        transform: null,
+        final_response: null,
+      }
+    : null;
   const proxyHost = resolveProxyHostForRequest(request, config);
   const headerForwardingPolicy = getHeaderForwardingPolicy(config);
 
@@ -1870,6 +2965,16 @@ async function handleRequestCore(request, env, payload) {
     }
   }
 
+  if (debugTrace) {
+    debugTrace.outbound = {
+      timestamp: fmtTs(),
+      url: upstreamUrl.toString(),
+      method,
+      headers: toRedactedHeaderMap(upstreamHeaders, redactHeaderSet),
+      body_preview: previewBodyForDebug(upstreamBody || ""),
+    };
+  }
+
   const t0 = Date.now();
   let upstreamResp;
   try {
@@ -1898,6 +3003,48 @@ async function handleRequestCore(request, env, payload) {
     jsonBody = parseJsonOrNull(textBody);
     parseMs = Date.now() - parseStart;
   }
+  if (debugTrace) {
+    debugTrace.target_response = {
+      timestamp: fmtTs(),
+      status: upstreamResp.status,
+      headers: toRedactedHeaderMap(upstreamResp.headers, redactHeaderSet),
+      body_preview: previewBodyForDebug(responseType === "json" ? jsonBody ?? textBody : textBody),
+    };
+  }
+
+  async function emitDebugTrace(transformInfo, finalHttpStatus, finalBody) {
+    if (!debugTrace) return null;
+    debugTrace.transform = {
+      timestamp: fmtTs(),
+      action: transformInfo.action,
+      matched_rule: transformInfo.matched_rule || null,
+      expression_source: transformInfo.expression_source || "none",
+      output_preview: previewBodyForDebug(transformInfo.output_preview || ""),
+    };
+    debugTrace.final_response = {
+      timestamp: fmtTs(),
+      http_status: finalHttpStatus,
+      body_preview: previewBodyForDebug(finalBody),
+    };
+    const traceText = buildDebugTraceText(debugTrace);
+    lastDebugTrace = {
+      id: debugTrace.id,
+      timestamp: fmtTs(),
+      text: traceText,
+    };
+    const sink = await pushDebugTraceToLoggingUrl(traceText, debugTrace, config);
+    const loggingUrlStatus = !sink.attempted
+      ? "off"
+      : sink.ok
+        ? "ok"
+        : `error:${sink.error_code || "LOGGING_URL_ERROR"}${sink.status ? `:${sink.status}` : ""}`;
+    const out = {
+      "X-Proxy-Debug": "True",
+      "X-Proxy-Debug-Trace-Id": debugTrace.id,
+      "X-Proxy-Debug-Logging-Endpoint-Status": loggingUrlStatus,
+    };
+    return out;
+  }
 
   const metaBase = {
     status: upstreamResp.status,
@@ -1910,9 +3057,34 @@ async function handleRequestCore(request, env, payload) {
   const transformConfig = config.transform || DEFAULT_CONFIG_V1.transform;
   if (!transformConfig.enabled) {
     if (responseType === "json" && jsonBody === null) {
-      return apiError(200, "INVALID_JSON_RESPONSE", "Upstream indicated JSON but body could not be parsed", null, metaBase);
+      const debugHeaders = await emitDebugTrace(
+        {
+          action: "error",
+          matched_rule: null,
+          expression_source: "none",
+          output_preview: "INVALID_JSON_RESPONSE",
+        },
+        200,
+        { error: { code: "INVALID_JSON_RESPONSE" } }
+      );
+      return jsonResponse(
+        200,
+        errorEnvelope("INVALID_JSON_RESPONSE", "Upstream indicated JSON but body could not be parsed", null, metaBase),
+        debugHeaders
+      );
     }
-    return jsonResponse(200, successEnvelope(jsonBody !== null ? jsonBody : textBody, metaBase));
+    const passthroughData = jsonBody !== null ? jsonBody : textBody;
+    const debugHeaders = await emitDebugTrace(
+      {
+        action: "skipped",
+        matched_rule: null,
+        expression_source: "none",
+        output_preview: passthroughData,
+      },
+      200,
+      successEnvelope(passthroughData, metaBase)
+    );
+    return jsonResponse(200, successEnvelope(passthroughData, metaBase), debugHeaders);
   }
 
   const ruleCtx = {
@@ -1932,15 +3104,42 @@ async function handleRequestCore(request, env, payload) {
     transformSource = "defaultExpr";
   } else if (transformConfig.fallback === "passthrough") {
     if (responseType === "json" && jsonBody === null) {
-      return apiError(200, "INVALID_JSON_RESPONSE", "Upstream indicated JSON but body could not be parsed", null, metaBase);
+      const debugHeaders = await emitDebugTrace(
+        {
+          action: "error",
+          matched_rule: null,
+          expression_source: "none",
+          output_preview: "INVALID_JSON_RESPONSE",
+        },
+        200,
+        { error: { code: "INVALID_JSON_RESPONSE" } }
+      );
+      return jsonResponse(
+        200,
+        errorEnvelope("INVALID_JSON_RESPONSE", "Upstream indicated JSON but body could not be parsed", null, metaBase),
+        debugHeaders
+      );
     }
+    const passthroughData = jsonBody !== null ? jsonBody : textBody;
+    const passthroughEnvelope = successEnvelope(passthroughData, {
+      ...metaBase,
+      skipped: true,
+      transform_trace: trace,
+    });
+    const debugHeaders = await emitDebugTrace(
+      {
+        action: "skipped",
+        matched_rule: null,
+        expression_source: "none",
+        output_preview: passthroughData,
+      },
+      200,
+      passthroughEnvelope
+    );
     return jsonResponse(
       200,
-      successEnvelope(jsonBody !== null ? jsonBody : textBody, {
-        ...metaBase,
-        skipped: true,
-        transform_trace: trace,
-      })
+      passthroughEnvelope,
+      debugHeaders
     );
   } else {
     throw new HttpError(422, "TRANSFORM_RULE_NOT_MATCHED", "No transform rule matched and fallback is set to error", {
@@ -1982,17 +3181,24 @@ async function handleRequestCore(request, env, payload) {
     });
   }
   const transformMs = Date.now() - transformStart;
-
-  return jsonResponse(
+  const finalEnvelope = successEnvelope(output, {
+    ...metaBase,
+    parse_ms: parseMs,
+    transform_ms: transformMs,
+    transform_source: transformSource,
+    transform_trace: trace,
+  });
+  const debugHeaders = await emitDebugTrace(
+    {
+      action: "executed",
+      matched_rule: matchedRule ? matchedRule.name : null,
+      expression_source: transformSource,
+      output_preview: output,
+    },
     200,
-    successEnvelope(output, {
-      ...metaBase,
-      parse_ms: parseMs,
-      transform_ms: transformMs,
-      transform_source: transformSource,
-      transform_trace: trace,
-    })
+    finalEnvelope
   );
+  return jsonResponse(200, finalEnvelope, debugHeaders);
 }
 
 function htmlPage(title, bodyHtml) {
