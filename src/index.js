@@ -142,7 +142,7 @@ export default {
         return Response.redirect(new URL(`${RESERVED_ROOT}/`, request.url).toString(), 302);
       }
       if (normalizedPath === RESERVED_ROOT && request.method === "GET") {
-        return await handleStatusPage(env);
+        return await handleStatusPage(env, request);
       }
       if (normalizedPath === `${RESERVED_ROOT}/init` && request.method === "GET") {
         return await handleInitPage(env, request);
@@ -1313,21 +1313,27 @@ function resolveUpstreamUrl(rawUrl, proxyHostHeader) {
   }
 }
 
-async function handleStatusPage(env) {
+async function handleStatusPage(env, request) {
   ensureKvBinding(env);
   const [proxyKey, adminKey] = await Promise.all([env.CONFIG.get(KV_PROXY_KEY), env.CONFIG.get(KV_ADMIN_KEY)]);
   const proxyInitialized = !!proxyKey;
   const adminInitialized = !!adminKey;
+  if (!proxyInitialized || !adminInitialized) {
+    return Response.redirect(new URL(`${RESERVED_ROOT}/init`, request.url).toString(), 302);
+  }
   const testingDocsUrl = getDocsSectionUrl(env, "testing-out-your-proxy");
   const keyManagementDocsUrl = getDocsSectionUrl(env, "key-management");
 
   return new Response(
     htmlPage(
       "API Transform Proxy",
-      `<p><b>Proxy key initialized:</b> ${proxyInitialized ? "yes" : "no"}</p>
-       <p><b>Admin key initialized:</b> ${adminInitialized ? "yes" : "no"}</p>
-       <p><b>Next steps:</b><br />
-       <a href="${escapeHtml(testingDocsUrl)}" target="_blank" rel="noopener noreferrer">Testing out your proxy</a> | <a href="${escapeHtml(keyManagementDocsUrl)}" target="_blank" rel="noopener noreferrer">Rotating keys</a></p>`
+      `<p><b>Status:</b> 🟢 Running</p>
+       <p><b>Admin API Key:</b> ••••••••••••• (key cannot be viewed again)</p>
+       <p><b>Proxy API Key:</b> ••••••••••••• (key cannot be viewed again)</p>
+       <p><b>How to reset keys</b><br />
+       <a href="${escapeHtml(keyManagementDocsUrl)}" target="_blank" rel="noopener noreferrer">Rotating keys</a></p>
+       <p><b>How to test</b><br />
+       <a href="${escapeHtml(testingDocsUrl)}" target="_blank" rel="noopener noreferrer">Testing out your proxy</a></p>`
     ),
     { headers: { "content-type": "text/html; charset=utf-8" } }
   );
@@ -1592,18 +1598,8 @@ async function handleInitPage(env, request) {
        <p style="color:#b91c1c;font-weight:700;">
          These API secrets will only be displayed on this page one time. Please copy and store them safely.
        </p>
-       ${renderSecretField(
-         "Admin API Secret",
-         createdAdmin || "",
-         "admin-api-secret",
-         createdAdmin ? "" : "Not shown (already initialized)"
-       )}
-       ${renderSecretField(
-         "Requestor API Secret",
-         createdProxy || "",
-         "requestor-api-secret",
-         createdProxy ? "" : "Not shown (already initialized)"
-       )}
+       ${createdAdmin ? renderSecretField("Admin API Secret", createdAdmin, "admin-api-secret") : ""}
+       ${createdProxy ? renderSecretField("Requestor API Secret", createdProxy, "requestor-api-secret") : ""}
        <script>
          function toggleSecret(id) {
            const input = document.getElementById(id);
