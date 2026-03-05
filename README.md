@@ -209,8 +209,12 @@ wrangler secret put TARGET_AUTH_BEARER
 - `GET /_apiproxy/admin`
   - Browser admin console for all admin endpoints.
   - Prompts for `X-Admin-Key`, then provides UI controls for status, config, debug/logging, enrichments, and key rotation.
-- `GET /_apiproxy/admin/debug`
+- `POST /_apiproxy/admin/access-token`
   - Requires header `X-Admin-Key`.
+  - Returns short-lived admin access token.
+  - Response: `{ "ok": true, "data": { "access_token": "...", "expires_at_ms": 123, "ttl_seconds": 3600 } }`
+- `GET /_apiproxy/admin/debug`
+  - Requires `X-Admin-Access-Token` (or `X-Admin-Key`).
   - Returns debug status, remaining TTL, and configured `debug.max_ttl_seconds`.
 - `PUT /_apiproxy/admin/debug`
   - Requires header `X-Admin-Key`.
@@ -227,12 +231,15 @@ wrangler secret put TARGET_AUTH_BEARER
   - Returns most recent debug trace captured in this Worker instance.
   - `Accept: text/plain` returns plain text trace.
 - `PUT /_apiproxy/admin/debug/loggingSecret`
-  - Requires header `X-Admin-Key`.
+  - Requires `X-Admin-Access-Token` (or `X-Admin-Key`).
   - Requires `Content-Type: application/json`.
   - Stores logging auth secret in KV.
   - Body: `{ "value": "..." }`
+- `GET /_apiproxy/admin/debug/loggingSecret`
+  - Requires `X-Admin-Access-Token` (or `X-Admin-Key`).
+  - Returns whether a logging auth secret is currently set.
 - `DELETE /_apiproxy/admin/debug/loggingSecret`
-  - Requires header `X-Admin-Key`.
+  - Requires `X-Admin-Access-Token` (or `X-Admin-Key`).
   - Removes logging auth secret from KV.
 - `POST /_apiproxy/request`
   - Requires header `X-Proxy-Key`.

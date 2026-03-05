@@ -27,6 +27,7 @@ const KV_ENRICHED_HEADER_PREFIX = "enriched_header:";
 const KV_BOOTSTRAP_ENRICHED_HEADER_NAMES = "bootstrap_enriched_header_names_v1";
 const KV_DEBUG_ENABLED_UNTIL_MS = "debug_enabled_until_ms";
 const KV_DEBUG_LOGGING_SECRET = "debug_logging_secret";
+const KV_ADMIN_ACCESS_TOKEN_PREFIX = "admin_access_token:";
 const RESERVED_ROOT = "/_apiproxy";
 const ADMIN_ROOT = `${RESERVED_ROOT}/admin`;
 const DEFAULT_DOCS_URL = "https://github.com/jtreibick/api-transform-proxy/blob/main/README.md";
@@ -40,6 +41,7 @@ const DEFAULTS = {
   MAX_EXPR_BYTES: 16 * 1024,
   TRANSFORM_TIMEOUT_MS: 400,
   ROTATE_OVERLAP_MS: 10 * 60 * 1000,
+  ADMIN_ACCESS_TOKEN_TTL_SECONDS: 3600,
 };
 
 const EXPECTED_REQUEST_SCHEMA = {
@@ -177,73 +179,81 @@ export default {
       if (normalizedPath === ADMIN_ROOT && request.method === "GET") {
         return handleAdminPage();
       }
-      if (normalizedPath === `${ADMIN_ROOT}/version` && request.method === "GET") {
+      if (normalizedPath === `${ADMIN_ROOT}/access-token` && request.method === "POST") {
         await requireAdminKey(request, env);
+        return await handleAdminAccessTokenPost(env);
+      }
+      if (normalizedPath === `${ADMIN_ROOT}/version` && request.method === "GET") {
+        await requireAdminAuth(request, env);
         return handleVersion(env);
       }
       if (normalizedPath === `${ADMIN_ROOT}/rotate` && request.method === "POST") {
-        await requireAdminKey(request, env);
+        await requireAdminAuth(request, env);
         return await handleRotate(request, env);
       }
       if (normalizedPath === `${ADMIN_ROOT}/rotate-admin` && request.method === "POST") {
-        await requireAdminKey(request, env);
+        await requireAdminAuth(request, env);
         return await handleRotateAdmin(request, env);
       }
       if (normalizedPath === `${ADMIN_ROOT}/keys` && request.method === "GET") {
-        await requireAdminKey(request, env);
+        await requireAdminAuth(request, env);
         return await handleKeysStatusGet(env);
       }
       if (normalizedPath === `${ADMIN_ROOT}/config` && request.method === "GET") {
-        await requireAdminKey(request, env);
+        await requireAdminAuth(request, env);
         return await handleConfigGet(env);
       }
       if (normalizedPath === `${ADMIN_ROOT}/config` && request.method === "PUT") {
-        await requireAdminKey(request, env);
+        await requireAdminAuth(request, env);
         return await handleConfigPut(request, env);
       }
       if (normalizedPath === `${ADMIN_ROOT}/config/validate` && request.method === "POST") {
-        await requireAdminKey(request, env);
+        await requireAdminAuth(request, env);
         return await handleConfigValidate(request, env);
       }
       if (normalizedPath === `${ADMIN_ROOT}/config/test-rule` && request.method === "POST") {
-        await requireAdminKey(request, env);
+        await requireAdminAuth(request, env);
         return await handleConfigTestRule(request, env);
       }
       if (normalizedPath === `${ADMIN_ROOT}/debug` && request.method === "GET") {
-        await requireAdminKey(request, env);
+        await requireAdminAuth(request, env);
         return await handleDebugGet(env);
       }
       if (normalizedPath === `${ADMIN_ROOT}/debug` && request.method === "PUT") {
-        await requireAdminKey(request, env);
+        await requireAdminAuth(request, env);
         return await handleDebugPut(request, env);
       }
       if (normalizedPath === `${ADMIN_ROOT}/debug` && request.method === "DELETE") {
-        await requireAdminKey(request, env);
+        await requireAdminAuth(request, env);
         return await handleDebugDelete(env);
       }
       if (normalizedPath === `${ADMIN_ROOT}/debug/last` && request.method === "GET") {
-        await requireAdminKey(request, env);
+        await requireAdminAuth(request, env);
         return await handleDebugLastGet(request);
       }
       if (normalizedPath === `${ADMIN_ROOT}/debug/loggingSecret` && request.method === "PUT") {
-        await requireAdminKey(request, env);
+        await requireAdminAuth(request, env);
         return await handleDebugLoggingSecretPut(request, env);
       }
+      if (normalizedPath === `${ADMIN_ROOT}/debug/loggingSecret` && request.method === "GET") {
+        await requireAdminAuth(request, env);
+        return await handleDebugLoggingSecretGet(env);
+      }
       if (normalizedPath === `${ADMIN_ROOT}/debug/loggingSecret` && request.method === "DELETE") {
-        await requireAdminKey(request, env);
+        await requireAdminAuth(request, env);
         return await handleDebugLoggingSecretDelete(env);
       }
       if (normalizedPath === `${ADMIN_ROOT}/headers` && request.method === "GET") {
-        await requireAdminKey(request, env);
+        await requireAdminAuth(request, env);
         return await handleEnrichedHeadersList(env);
       }
       if (normalizedPath.startsWith(`${ADMIN_ROOT}/headers/`) && request.method === "PUT") {
-        await requireAdminKey(request, env);
+        await requireAdminAuth(request, env);
         const headerName = normalizedPath.slice(`${ADMIN_ROOT}/headers/`.length);
         return await handleEnrichedHeaderPut(request, env, headerName);
       }
       if (normalizedPath.startsWith(`${ADMIN_ROOT}/headers/`) && request.method === "DELETE") {
-        await requireAdminKey(request, env);
+        await requireAdminAuth(request, env);
         const headerName = normalizedPath.slice(`${ADMIN_ROOT}/headers/`.length);
         return await handleEnrichedHeaderDelete(env, headerName);
       }
@@ -1475,6 +1485,57 @@ async function requireAdminKey(request, env) {
   }
 }
 
+function getAdminAccessTokenFromRequest(request) {
+  const explicit = String(request.headers.get("X-Admin-Access-Token") || "").trim();
+  if (explicit) return explicit;
+  const auth = String(request.headers.get("authorization") || "");
+  const match = auth.match(/^Bearer\s+(.+)$/i);
+  return match ? match[1].trim() : "";
+}
+
+function adminAccessTokenKvKey(token) {
+  return `${KV_ADMIN_ACCESS_TOKEN_PREFIX}${token}`;
+}
+
+async function validateAdminAccessToken(token, env) {
+  if (!token) return false;
+  const raw = await env.CONFIG.get(adminAccessTokenKvKey(token));
+  if (!raw) return false;
+  const expiresAt = Number(raw);
+  const now = Date.now();
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) {
+    await env.CONFIG.delete(adminAccessTokenKvKey(token));
+    return false;
+  }
+  return true;
+}
+
+async function requireAdminAuth(request, env) {
+  const token = getAdminAccessTokenFromRequest(request);
+  if (token) {
+    const ok = await validateAdminAccessToken(token, env);
+    if (ok) return;
+    throw new HttpError(401, "UNAUTHORIZED_ADMIN", "Missing, invalid, or expired X-Admin-Access-Token");
+  }
+  await requireAdminKey(request, env);
+}
+
+async function handleAdminAccessTokenPost(env) {
+  const ttlSeconds = Math.max(60, getEnvInt(env, "ADMIN_ACCESS_TOKEN_TTL_SECONDS", DEFAULTS.ADMIN_ACCESS_TOKEN_TTL_SECONDS));
+  const token = generateSecret();
+  const expiresAtMs = Date.now() + ttlSeconds * 1000;
+  await env.CONFIG.put(adminAccessTokenKvKey(token), String(expiresAtMs));
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      access_token: token,
+      expires_at_ms: expiresAtMs,
+      ttl_seconds: ttlSeconds,
+    },
+    meta: {},
+  });
+}
+
 function getProxyHostHeader(request) {
   for (const name of PROXY_HOST_HEADER_NAMES) {
     const v = request.headers.get(name);
@@ -1610,7 +1671,45 @@ async function handleStatusPage(env, request) {
        <a href="${escapeHtml(keyManagementDocsUrl)}" target="_blank" rel="noopener noreferrer">Rotating keys</a></p>
        <p><b>How to test</b><br />
        <a href="${escapeHtml(testingDocsUrl)}" target="_blank" rel="noopener noreferrer">Testing out your proxy</a></p>
-       ${renderSecretFieldScript()}`
+       <hr style="margin:16px 0;border:none;border-top:1px solid #e5e7eb;" />
+       <p><b>Step 2: Login to Admin Console</b></p>
+       <p>Paste your Admin API key and click Login to continue.</p>
+       <input id="init-admin-key" type="password" placeholder="paste X-Admin-Key"
+         style="width:100%;max-width:560px;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;" />
+       <div style="margin-top:8px;">
+         <button type="button" onclick="initAdminLogin()"
+           style="padding:8px 12px;border:1px solid #0f172a;border-radius:8px;background:#111827;color:#fff;cursor:pointer;">Login</button>
+       </div>
+       <div id="init-admin-login-msg" style="margin-top:8px;color:#991b1b;"></div>
+       ${renderSecretFieldScript()}
+       <script>
+         async function initAdminLogin() {
+           const input = document.getElementById('init-admin-key');
+           const msg = document.getElementById('init-admin-login-msg');
+           const key = (input && input.value || '').trim();
+           if (!key) {
+             if (msg) msg.textContent = 'Enter your Admin API key first.';
+             return;
+           }
+           try {
+             const res = await fetch('${ADMIN_ROOT}/access-token', {
+               method: 'POST',
+               headers: { 'X-Admin-Key': key },
+             });
+             const text = await res.text();
+             let payload = null;
+             try { payload = JSON.parse(text); } catch {}
+             if (!res.ok || !payload?.data?.access_token) {
+               if (msg) msg.textContent = 'Login failed. Check your admin key and try again.';
+               return;
+             }
+             try { sessionStorage.setItem('apiproxy_admin_access_token_v1', payload.data.access_token); } catch {}
+             window.location.href = '${ADMIN_ROOT}';
+           } catch {
+             if (msg) msg.textContent = 'Login failed. Try again.';
+           }
+         }
+       </script>`
     ),
     { headers: { "content-type": "text/html; charset=utf-8" } }
   );
@@ -1642,8 +1741,16 @@ async function handleKeysStatusGet(env) {
   ]);
   const proxyOldExpiresAt = parseMs(proxyOldExpiresAtRaw);
   const proxyOldActive = !!proxyKeyOld && proxyOldExpiresAt > now;
-  const proxyRotatedAt = parseMs(proxyRotatedAtRaw);
-  const adminRotatedAt = parseMs(adminRotatedAtRaw);
+  let proxyRotatedAt = parseMs(proxyRotatedAtRaw);
+  let adminRotatedAt = parseMs(adminRotatedAtRaw);
+  if (proxyKey && !proxyRotatedAt) {
+    proxyRotatedAt = now;
+    await env.CONFIG.put(KV_PROXY_KEY_ROTATED_AT, String(proxyRotatedAt));
+  }
+  if (adminKey && !adminRotatedAt) {
+    adminRotatedAt = now;
+    await env.CONFIG.put(KV_ADMIN_KEY_ROTATED_AT, String(adminRotatedAt));
+  }
 
   return jsonResponse(200, {
     ok: true,
@@ -1982,6 +2089,17 @@ async function handleDebugLoggingSecretPut(request, env) {
   });
 }
 
+async function handleDebugLoggingSecretGet(env) {
+  const secret = await env.CONFIG.get(KV_DEBUG_LOGGING_SECRET);
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      logging_secret_set: !!secret,
+    },
+    meta: {},
+  });
+}
+
 async function handleDebugLoggingSecretDelete(env) {
   await env.CONFIG.delete(KV_DEBUG_LOGGING_SECRET);
   return jsonResponse(200, {
@@ -1997,11 +2115,7 @@ function handleAdminPage() {
   return new Response(
     htmlPage(
       "",
-      `<div id="saved-storage-warning" style="display:none;padding:10px 12px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:8px;margin:0 0 12px 0;">
-         ⛔️ Admin key saved on this device. Remove it with "Forget key" when done.
-         <a href="#" id="remove-local-key-link" style="color:#991b1b;text-decoration:underline;">Remove it</a>
-       </div>
-       <div style="margin-bottom:10px;">
+      `<div style="margin-bottom:10px;">
          <img src="${FAVICON_DATA_URL}" width="48" height="48" alt="API Transform Proxy icon" />
        </div>
        <h1 style="margin:0 0 10px 0;font-size:30px;">Admin Console</h1>
@@ -2011,12 +2125,8 @@ function handleAdminPage() {
          <input id="admin-key" type="password" placeholder="paste X-Admin-Key"
            style="width:100%;max-width:560px;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;" />
          <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-           <button type="button" id="connect-btn"
-             style="padding:8px 12px;border:1px solid #0f172a;border-radius:8px;background:#111827;color:#fff;cursor:pointer;">Connect</button>
-           <label for="save-key-local" style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;">
-             <input id="save-key-local" type="checkbox" />
-             <span>Save Admin API Key Locally (Auto Login)</span>
-           </label>
+           <button type="button" id="login-btn"
+             style="padding:8px 12px;border:1px solid #0f172a;border-radius:8px;background:#111827;color:#fff;cursor:pointer;">Login</button>
          </div>
        </div>
        <div id="admin-shell" style="display:none;">
@@ -2036,10 +2146,23 @@ function handleAdminPage() {
          </div>
          <div id="tab-debug" class="tab-panel" style="display:none;">
            <p><b>Logging controls</b></p>
+           <div id="logging-status" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin-bottom:10px;">Loading logging status...</div>
            <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
              <button type="button" id="debug-enable-btn">Enable debug</button>
              <button type="button" id="debug-disable-btn">Disable debug</button>
            </div>
+           <p style="margin-top:16px;"><b>Logging configuration (read-only)</b></p>
+           <label for="logging-config-url" style="display:block;margin:8px 0 4px;">Logging Endpoint URL (from YAML config)</label>
+           <input id="logging-config-url" type="text" readonly
+             style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;margin-bottom:8px;" />
+           <label for="logging-config-auth-header" style="display:block;margin:2px 0 4px;">Logging Auth Header (from YAML config)</label>
+           <input id="logging-config-auth-header" type="text" readonly
+             style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;margin-bottom:8px;" />
+           <p style="font-size:13px;color:#475569;margin:6px 0 0 0;">To modify logging URL/header, update YAML config under <code>debug.loggingEndpoint</code>.</p>
+           <p style="font-size:13px;color:#475569;margin:4px 0 0 0;">Logging secrets are managed via this API only and are not stored in YAML.</p>
+           <pre id="logging-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Logging output appears here.</pre>
+           <p style="margin-top:10px;"><a href="#" id="debug-refresh-trace-link">Refresh last trace</a></p>
+           <pre id="debug-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;">Debug output appears here.</pre>
            <p style="margin-top:16px;"><b>Logging auth secret</b></p>
            <label for="logging-secret" style="display:block;margin:8px 0 4px;">Secret value</label>
            <input id="logging-secret" type="password" placeholder="set logging auth secret"
@@ -2048,9 +2171,6 @@ function handleAdminPage() {
              <button type="button" id="logging-secret-save-btn">Save secret</button>
              <button type="button" id="logging-secret-delete-btn">Delete secret</button>
            </div>
-           <pre id="logging-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Logging output appears here.</pre>
-           <p style="margin-top:10px;"><a href="#" id="debug-refresh-trace-link">Refresh last trace</a></p>
-           <pre id="debug-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;">Debug output appears here.</pre>
          </div>
          <div id="tab-config" class="tab-panel" style="display:none;">
            <p><b>YAML config</b></p>
@@ -2074,7 +2194,7 @@ function handleAdminPage() {
            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
              <input id="header-value" type="password" placeholder="header secret value"
                style="width:100%;max-width:360px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
-             <button type="button" id="header-value-toggle-btn" style="margin-bottom:8px;">Show</button>
+             <a href="#" id="header-value-toggle-btn" style="margin-bottom:8px;font-size:12px;text-decoration:underline;">show</a>
            </div>
            <div style="display:flex;gap:8px;flex-wrap:wrap;">
              <button type="button" id="headers-save-btn">Add header</button>
@@ -2095,21 +2215,6 @@ function handleAdminPage() {
          </div>
          </div>
        </div>
-       <dialog id="save-key-modal" style="max-width:560px;border:1px solid #e2e8f0;border-radius:10px;padding:16px;">
-         <p style="margin-top:0;"><b>Save admin key on this device?</b></p>
-         <p style="margin:8px 0;">Saving this admin key stores it in this browser profile on this device.</p>
-         <p style="margin:8px 0;">Anyone with access to this machine/profile can use it to view sensitive traces and modify proxy settings.</p>
-         <ul style="margin:8px 0 8px 20px;">
-           <li>Anyone with this key can change routing/config and break your proxy behavior.</li>
-           <li>Anyone with this key can view debug traces and potentially access sensitive request/response data.</li>
-           <li>Anyone with this key can rotate keys and lock out legitimate operators.</li>
-         </ul>
-         <p style="margin:8px 0;">If this key is exposed, rotate it immediately.</p>
-         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
-           <button type="button" id="save-key-cancel-btn">Cancel</button>
-           <button type="button" id="save-key-confirm-btn">I Understand, Save</button>
-         </div>
-       </dialog>
        <dialog id="delete-header-modal" style="max-width:420px;border:1px solid #e2e8f0;border-radius:10px;padding:16px;">
          <p style="margin-top:0;"><b>Delete enrichment?</b></p>
          <p id="delete-header-modal-text" style="margin:8px 0 12px 0;"></p>
@@ -2120,7 +2225,7 @@ function handleAdminPage() {
        </dialog>
        <script>
          const ADMIN_ROOT = '${ADMIN_ROOT}';
-         const ADMIN_KEY_STORAGE = 'apiproxy_admin_key_v1';
+         const ADMIN_ACCESS_TOKEN_STORAGE = 'apiproxy_admin_access_token_v1';
          const DEFAULT_CONFIG_YAML_TEMPLATE = \`targetHost: null
 debug:
   redact_headers:
@@ -2154,7 +2259,6 @@ header_forwarding:
     - xproxyhost
 \`;
          let currentKey = '';
-         let pendingLocalSaveApproval = false;
          let pendingDeleteHeaderName = '';
          let configValidateTimer = null;
 
@@ -2177,17 +2281,6 @@ header_forwarding:
          }
          function readKeyInput() {
            return (el('admin-key')?.value || '').trim();
-         }
-         function saveKeyChecked() {
-           return !!el('save-key-local')?.checked;
-         }
-         function setSaveKeyChecked(checked) {
-           if (el('save-key-local')) el('save-key-local').checked = !!checked;
-         }
-         function updateSavedWarning() {
-           const savedWarning = el('saved-storage-warning');
-           if (!savedWarning) return;
-           savedWarning.style.display = localStorage.getItem(ADMIN_KEY_STORAGE) ? 'block' : 'none';
          }
          function setConfigValidationError(message) {
            const field = el('config-yaml');
@@ -2261,29 +2354,22 @@ header_forwarding:
            if (auth) auth.style.display = currentKey ? 'none' : 'block';
            if (!currentKey) {
              showWarning('');
-             updateSavedWarning();
-             return;
-           }
-            updateSavedWarning();
-         }
-         function clearSavedKey() {
-           localStorage.removeItem(ADMIN_KEY_STORAGE);
-           setSaveKeyChecked(false);
-           updateSavedWarning();
+              return;
+            }
          }
          function handleUnauthorized() {
-           clearSavedKey();
-           currentKey = '';
-           if (el('admin-key')) el('admin-key').value = '';
-           if (el('admin-shell')) el('admin-shell').style.display = 'none';
-           if (el('admin-auth')) el('admin-auth').style.display = 'block';
-           showWarning('Admin key is invalid or expired. Re-enter X-Admin-Key.');
+            currentKey = '';
+            try { sessionStorage.removeItem(ADMIN_ACCESS_TOKEN_STORAGE); } catch {}
+            if (el('admin-key')) el('admin-key').value = '';
+            if (el('admin-shell')) el('admin-shell').style.display = 'none';
+            if (el('admin-auth')) el('admin-auth').style.display = 'block';
+            showWarning('Admin key is invalid or expired. Re-enter X-Admin-Key.');
          }
          async function apiCall(path, method, body, expectText) {
            if (!currentKey) {
-             throw new Error('Provide an Admin API Key first.');
-           }
-           const headers = { 'X-Admin-Key': currentKey };
+             throw new Error('Login first.');
+            }
+           const headers = { 'X-Admin-Access-Token': currentKey };
            if (body !== undefined && !expectText) headers['Content-Type'] = 'application/json';
            if (expectText) headers['Accept'] = 'text/plain';
            const res = await fetch(path, {
@@ -2313,10 +2399,13 @@ header_forwarding:
                btn.style.borderColor = active ? '#111827' : '#cbd5e1';
                btn.style.fontWeight = active ? '700' : '500';
              });
-             if (name === 'debug') debugLoadTrace();
+             if (name === 'debug') {
+               debugLoadTrace();
+               loadLoggingStatus();
+             }
              if (name === 'headers') headersList();
              if (name === 'keys') keysRefresh();
-            }
+           }
            btns.forEach((btn) => {
              btn.style.padding = '8px 10px';
              btn.style.border = '1px solid #cbd5e1';
@@ -2336,7 +2425,7 @@ header_forwarding:
            if (!n) return 'n/a';
            try { return new Date(n).toLocaleString(); } catch { return 'n/a'; }
          }
-         function formatOverviewStatus(version, debug, headers, keys) {
+         function formatOverviewStatus(version, debug, headers) {
            const versionText = version?.data?.version || 'unknown';
            const debugData = debug?.data || {};
            const debugEnabled = !!debugData.enabled;
@@ -2344,37 +2433,35 @@ header_forwarding:
            const enrichedHeaders = Array.isArray(headers?.enriched_headers)
              ? headers.enriched_headers
              : (Array.isArray(headers?.data?.enriched_headers) ? headers.data.enriched_headers : []);
-           const proxy = keys?.data?.proxy || {};
-           const admin = keys?.data?.admin || {};
            return '<div><b>Build Version:</b> ' + versionText + '</div>'
              + '<div><b>Debug Enabled:</b> ' + (debugEnabled ? 'yes' : 'no') + '</div>'
              + '<div><b>Debug TTL Remaining (seconds):</b> ' + ttlRemaining + '</div>'
-             + '<div><b>Enrichments:</b> ' + (enrichedHeaders.length ? enrichedHeaders.join(', ') : '(none)') + '</div>'
-             + '<div><b>Proxy Key:</b> primary=' + (proxy.primary_active ? 'active' : 'missing')
-             + ', secondary=' + (proxy.secondary_active ? 'active' : 'inactive')
-             + ', last rotated=' + formatMs(proxy.last_rotated_at_ms) + '</div>'
-             + '<div><b>Admin Key:</b> primary=' + (admin.primary_active ? 'active' : 'missing')
-             + ', last rotated=' + formatMs(admin.last_rotated_at_ms) + '</div>';
+             + '<div><b>Enrichments:</b> ' + (enrichedHeaders.length ? enrichedHeaders.join(', ') : '(none)') + '</div>';
          }
          async function refreshOverview() {
            try {
-             const [version, debug, headers, keys] = await Promise.all([
+             const [version, debug, headers] = await Promise.all([
                apiCall(ADMIN_ROOT + '/version', 'GET'),
                apiCall(ADMIN_ROOT + '/debug', 'GET'),
                apiCall(ADMIN_ROOT + '/headers', 'GET'),
-               apiCall(ADMIN_ROOT + '/keys', 'GET'),
              ]);
-             setHtml('overview-output', formatOverviewStatus(version, debug, headers, keys));
+             setHtml('overview-output', formatOverviewStatus(version, debug, headers));
            } catch (e) {
              setOutput('overview-output', String(e.message || e));
            }
          }
          async function debugEnable() {
-           try { setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug', 'PUT', { enabled: true })); }
+           try {
+             setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug', 'PUT', { enabled: true }));
+             await loadLoggingStatus();
+           }
            catch (e) { setOutput('debug-output', String(e.message || e)); }
          }
          async function debugDisable() {
-           try { setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug', 'DELETE')); }
+           try {
+             setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug', 'DELETE'));
+             await loadLoggingStatus();
+           }
            catch (e) { setOutput('debug-output', String(e.message || e)); }
          }
          async function debugLoadTrace() {
@@ -2385,13 +2472,53 @@ header_forwarding:
            try {
              const payload = { value: el('logging-secret')?.value || '' };
              setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug/loggingSecret', 'PUT', payload));
+             await loadLoggingStatus();
            } catch (e) {
              setOutput('logging-output', String(e.message || e));
            }
          }
          async function loggingSecretDelete() {
-           try { setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug/loggingSecret', 'DELETE')); }
+           try {
+             setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug/loggingSecret', 'DELETE'));
+             await loadLoggingStatus();
+           }
            catch (e) { setOutput('logging-output', String(e.message || e)); }
+         }
+         async function loadLoggingStatus() {
+           try {
+             const [debugStatus, secretStatus, yamlText] = await Promise.all([
+               apiCall(ADMIN_ROOT + '/debug', 'GET'),
+               apiCall(ADMIN_ROOT + '/debug/loggingSecret', 'GET'),
+               apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true),
+             ]);
+             let endpointUrl = '(not set)';
+             let endpointAuthHeader = '(not set)';
+             try {
+               const res = await fetch(ADMIN_ROOT + '/config/validate', {
+                 method: 'POST',
+                 headers: { 'X-Admin-Access-Token': currentKey, 'Content-Type': 'text/yaml' },
+                 body: yamlText,
+               });
+               const txt = await res.text();
+               let parsed = null;
+               try { parsed = JSON.parse(txt); } catch {}
+               if (res.ok && parsed?.data?.config?.debug?.loggingEndpoint) {
+                 const cfg = parsed.data.config.debug.loggingEndpoint;
+                 endpointUrl = cfg.url || '(not set)';
+                 endpointAuthHeader = cfg.auth_header || '(not set)';
+               }
+             } catch {}
+             if (el('logging-config-url')) el('logging-config-url').value = endpointUrl;
+             if (el('logging-config-auth-header')) el('logging-config-auth-header').value = endpointAuthHeader;
+             const d = debugStatus?.data || {};
+             const statusHtml =
+               '<div><b>Debug enabled:</b> ' + (d.enabled ? 'yes' : 'no') + '</div>'
+               + '<div><b>Debug TTL remaining (seconds):</b> ' + Number(d.ttl_remaining_seconds || 0) + '</div>'
+               + '<div><b>Logging secret set:</b> ' + (secretStatus?.data?.logging_secret_set ? 'yes' : 'no') + '</div>';
+             setHtml('logging-status', statusHtml);
+           } catch (e) {
+             setOutput('logging-output', String(e.message || e));
+           }
          }
          async function configLoad() {
            try {
@@ -2410,7 +2537,7 @@ header_forwarding:
            try {
              const res = await fetch(ADMIN_ROOT + '/config/validate', {
                method: 'POST',
-               headers: { 'X-Admin-Key': currentKey, 'Content-Type': 'text/yaml' },
+               headers: { 'X-Admin-Access-Token': currentKey, 'Content-Type': 'text/yaml' },
                body: yaml,
              });
              if (res.status === 401) {
@@ -2453,7 +2580,7 @@ header_forwarding:
            try {
              const res = await fetch(ADMIN_ROOT + '/config', {
                method: 'PUT',
-               headers: { 'X-Admin-Key': currentKey, 'Content-Type': 'text/yaml' },
+               headers: { 'X-Admin-Access-Token': currentKey, 'Content-Type': 'text/yaml' },
                body: yaml,
              });
              if (res.status === 401) {
@@ -2536,7 +2663,16 @@ header_forwarding:
            pendingDeleteHeaderName = String(name || '');
            const text = el('delete-header-modal-text');
            if (text) text.textContent = 'Delete enrichment "' + pendingDeleteHeaderName + '"?';
-           el('delete-header-modal')?.showModal();
+           const modal = el('delete-header-modal');
+           if (modal && typeof modal.showModal === 'function') {
+             modal.showModal();
+             return;
+           }
+           if (window.confirm('Delete enrichment "' + pendingDeleteHeaderName + '"?')) {
+             headersDeleteConfirmed();
+           } else {
+             pendingDeleteHeaderName = '';
+           }
          }
          function toggleHeaderValueVisibility() {
            const field = el('header-value');
@@ -2544,7 +2680,7 @@ header_forwarding:
            if (!field || !btn) return;
            const hidden = field.type === 'password';
            field.type = hidden ? 'text' : 'password';
-           btn.textContent = hidden ? 'Hide' : 'Show';
+           btn.textContent = hidden ? 'hide' : 'show';
          }
          async function keysRefresh() {
            try {
@@ -2578,7 +2714,6 @@ header_forwarding:
              const out = await apiCall(ADMIN_ROOT + '/rotate-admin', 'POST');
              setOutput('keys-output', out);
              await keysRefresh();
-             clearSavedKey();
              setCurrentKey('');
              showWarning('Admin key rotated. Re-enter the new admin key from response.');
            } catch (e) {
@@ -2588,68 +2723,42 @@ header_forwarding:
 
          function bind() {
            attachTabs();
-           el('connect-btn')?.addEventListener('click', async () => {
-             const key = readKeyInput();
-             if (!key) {
+           el('login-btn')?.addEventListener('click', async () => {
+             const adminKey = readKeyInput();
+             if (!adminKey) {
                showWarning('Enter an admin key first.');
                return;
              }
-             if (saveKeyChecked()) {
-               localStorage.setItem(ADMIN_KEY_STORAGE, key);
-             } else {
-               clearSavedKey();
-             }
-             setCurrentKey(key);
              try {
-               await refreshOverview();
-               await debugLoadTrace();
-               await configLoad();
-               await headersList();
-               await keysRefresh();
-             } catch {
-               // no-op
+               const res = await fetch(ADMIN_ROOT + '/access-token', {
+                 method: 'POST',
+                 headers: { 'X-Admin-Key': adminKey },
+               });
+               if (!res.ok) {
+                 const text = await res.text();
+                 throw new Error('Login failed: ' + text);
+               }
+               const payload = await res.json();
+               const token = String(payload?.data?.access_token || '');
+               if (!token) {
+                 throw new Error('Login failed: access token missing');
+               }
+               try { sessionStorage.setItem(ADMIN_ACCESS_TOKEN_STORAGE, token); } catch {}
+               setCurrentKey(token);
+               showWarning('');
+               try {
+                 await refreshOverview();
+                 await debugLoadTrace();
+                 await loadLoggingStatus();
+                 await configLoad();
+                 await headersList();
+                 await keysRefresh();
+               } catch {
+                 // no-op
+               }
+             } catch (e) {
+               showWarning(String(e.message || e));
              }
-           });
-           el('save-key-local')?.addEventListener('change', (evt) => {
-             const checked = !!evt?.target?.checked;
-             if (!checked) {
-               pendingLocalSaveApproval = false;
-               clearSavedKey();
-               return;
-             }
-             const key = readKeyInput();
-             if (!key) {
-               setSaveKeyChecked(false);
-               showWarning('Enter an admin key before enabling local save.');
-               return;
-             }
-             pendingLocalSaveApproval = true;
-             el('save-key-modal')?.showModal();
-           });
-           el('save-key-cancel-btn')?.addEventListener('click', () => {
-             pendingLocalSaveApproval = false;
-             setSaveKeyChecked(false);
-             el('save-key-modal')?.close();
-           });
-           el('save-key-confirm-btn')?.addEventListener('click', () => {
-             pendingLocalSaveApproval = false;
-             const key = readKeyInput();
-             if (key) localStorage.setItem(ADMIN_KEY_STORAGE, key);
-             setSaveKeyChecked(!!key);
-             updateSavedWarning();
-             el('save-key-modal')?.close();
-             showWarning('Admin key will be saved locally on connect.');
-           });
-           el('save-key-modal')?.addEventListener('close', () => {
-             if (pendingLocalSaveApproval) {
-               setSaveKeyChecked(false);
-               pendingLocalSaveApproval = false;
-             }
-           });
-           el('remove-local-key-link')?.addEventListener('click', (evt) => {
-             evt.preventDefault();
-             clearSavedKey();
-             showWarning('Saved key removed.');
            });
            el('overview-refresh-btn')?.addEventListener('click', refreshOverview);
            el('debug-refresh-trace-link')?.addEventListener('click', (evt) => {
@@ -2676,10 +2785,13 @@ header_forwarding:
            });
            el('config-yaml')?.addEventListener('blur', () => configValidate(true));
            el('headers-save-btn')?.addEventListener('click', headersSave);
-           el('header-value-toggle-btn')?.addEventListener('click', toggleHeaderValueVisibility);
+           el('header-value-toggle-btn')?.addEventListener('click', (evt) => {
+             evt.preventDefault();
+             toggleHeaderValueVisibility();
+           });
            el('headers-list')?.addEventListener('click', (evt) => {
-             const target = evt.target;
-             if (!target || !target.classList?.contains('delete-header-btn')) return;
+             const target = evt.target?.closest ? evt.target.closest('.delete-header-btn') : null;
+             if (!target) return;
              const name = target.getAttribute('data-name') || '';
              promptDeleteHeader(name);
            });
@@ -2694,19 +2806,18 @@ header_forwarding:
            if (el('config-yaml') && !el('config-yaml').value.trim()) {
              el('config-yaml').value = DEFAULT_CONFIG_YAML_TEMPLATE;
            }
-
-           const saved = localStorage.getItem(ADMIN_KEY_STORAGE);
-           updateSavedWarning();
-           if (saved) {
-             setSaveKeyChecked(true);
-             if (el('admin-key')) el('admin-key').value = saved;
-             setCurrentKey(saved, true);
-             refreshOverview();
-             debugLoadTrace();
-             configLoad();
-             headersList();
-             keysRefresh();
-           }
+           try {
+             const token = sessionStorage.getItem(ADMIN_ACCESS_TOKEN_STORAGE) || '';
+             if (token) {
+               setCurrentKey(token);
+               refreshOverview();
+               debugLoadTrace();
+               loadLoggingStatus();
+               configLoad();
+               headersList();
+               keysRefresh();
+             }
+           } catch {}
          }
          bind();
        </script>`
