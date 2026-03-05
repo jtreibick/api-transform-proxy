@@ -68,6 +68,76 @@ header_forwarding:
 binding = "CONFIG"
 ```
 
+## Bootstrap (Step-by-step)
+
+1. Deploy the Worker and open your base URL:
+
+```bash
+export WORKER_URL="https://your-worker.workers.dev"
+curl -sS "$WORKER_URL/_apiproxy"
+```
+
+2. Bootstrap keys (first run only):
+
+```bash
+curl -sS "$WORKER_URL/_apiproxy/init"
+```
+
+- If keys do not exist, this returns HTML showing both:
+  - `X-Admin-Key`
+  - `X-Proxy-Key`
+- Copy and store both immediately. They are shown only when created.
+
+3. Export keys for terminal testing:
+
+```bash
+export ADMIN_KEY="value-shown-by-init"
+export PROXY_KEY="value-shown-by-init"
+```
+
+4. Confirm admin access works:
+
+```bash
+curl -sS "$WORKER_URL/_apiproxy/admin/version" \
+  -H "X-Admin-Key: $ADMIN_KEY"
+```
+
+5. Validate and save config:
+
+```bash
+curl -sS -X POST "$WORKER_URL/_apiproxy/admin/config/validate" \
+  -H "X-Admin-Key: $ADMIN_KEY" \
+  -H "Content-Type: text/yaml" \
+  --data-binary @examples/config-basic.yaml
+
+curl -sS -X PUT "$WORKER_URL/_apiproxy/admin/config" \
+  -H "X-Admin-Key: $ADMIN_KEY" \
+  -H "Content-Type: text/yaml" \
+  --data-binary @examples/config-basic.yaml
+```
+
+6. Send first proxied request:
+
+```bash
+curl -sS "$WORKER_URL/_apiproxy/request" \
+  -H "Content-Type: application/json" \
+  -H "X-Proxy-Key: $PROXY_KEY" \
+  -H "X-Proxy-Host: https://httpbin.org" \
+  --data '{"upstream":{"method":"GET","url":"/json"}}'
+```
+
+7. Rotate keys when needed:
+
+```bash
+# Rotate proxy key
+curl -sS -X POST "$WORKER_URL/_apiproxy/admin/rotate" \
+  -H "X-Admin-Key: $ADMIN_KEY"
+
+# Rotate admin key
+curl -sS -X POST "$WORKER_URL/_apiproxy/admin/rotate-admin" \
+  -H "X-Admin-Key: $ADMIN_KEY"
+```
+
 ## Endpoints
 
 - `GET /_apiproxy`
