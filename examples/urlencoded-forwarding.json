@@ -1,0 +1,13 @@
+{
+  "upstream": {
+    "method": "POST",
+    "url": "https://httpbin.org/post",
+    "body": {
+      "type": "urlencoded",
+      "value": {
+        "name": "Bubble",
+        "mode": "relay"
+      }
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "upstream": {
+    "method": "GET",
+    "url": "https://httpbin.org/json"
+  }
+}

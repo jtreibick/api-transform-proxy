@@ -1,0 +1,9 @@
+{
+  "upstream": {
+    "method": "GET",
+    "url": "https://httpbin.org/json"
+  },
+  "transform": {
+    "expr": "{\"title\": body.slideshow.title, \"slides\": body.slideshow.slides.{\"title\": title}}"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "upstream": {
+    "method": "GET",
+    "url": "https://httpbin.org/status/500"
+  },
+  "transform": {
+    "expr": "{\"status\": status, \"error\": body}",
+    "when": {
+      "status": {
+        "allow": ["4xx", "5xx"]
+      }
+    }
+  }
+}
