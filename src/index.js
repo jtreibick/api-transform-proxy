@@ -122,75 +122,76 @@ let yamlApi = null;
 export default {
   async fetch(request, env) {
     const { pathname } = new URL(request.url);
+    const normalizedPath = normalizePathname(pathname);
 
     try {
-      if (pathname === RESERVED_ROOT && request.method === "GET") {
+      if ((normalizedPath === "/" || normalizedPath === RESERVED_ROOT) && request.method === "GET") {
         return await handleStatusPage(env);
       }
-      if (pathname === `${RESERVED_ROOT}/init` && request.method === "GET") {
+      if (normalizedPath === `${RESERVED_ROOT}/init` && request.method === "GET") {
         return await handleInitPage(env);
       }
-      if (pathname === `${RESERVED_ROOT}/request` && request.method === "POST") {
+      if (normalizedPath === `${RESERVED_ROOT}/request` && request.method === "POST") {
         return await handleRequest(request, env);
       }
-      if (pathname === `${ADMIN_ROOT}/version` && request.method === "GET") {
+      if (normalizedPath === `${ADMIN_ROOT}/version` && request.method === "GET") {
         await requireAdminKey(request, env);
         return handleVersion(env);
       }
-      if (pathname === `${ADMIN_ROOT}/rotate` && request.method === "POST") {
+      if (normalizedPath === `${ADMIN_ROOT}/rotate` && request.method === "POST") {
         await requireAdminKey(request, env);
         return await handleRotate(request, env);
       }
-      if (pathname === `${ADMIN_ROOT}/rotate-admin` && request.method === "POST") {
+      if (normalizedPath === `${ADMIN_ROOT}/rotate-admin` && request.method === "POST") {
         await requireAdminKey(request, env);
         return await handleRotateAdmin(request, env);
       }
-      if (pathname === `${ADMIN_ROOT}/hosts` && request.method === "GET") {
+      if (normalizedPath === `${ADMIN_ROOT}/hosts` && request.method === "GET") {
         await requireAdminKey(request, env);
         return await handleHostsGet(env);
       }
-      if (pathname === `${ADMIN_ROOT}/hosts` && request.method === "POST") {
+      if (normalizedPath === `${ADMIN_ROOT}/hosts` && request.method === "POST") {
         await requireAdminKey(request, env);
         return await handleHostsPost(request, env);
       }
-      if (pathname === `${ADMIN_ROOT}/hosts` && request.method === "DELETE") {
+      if (normalizedPath === `${ADMIN_ROOT}/hosts` && request.method === "DELETE") {
         await requireAdminKey(request, env);
         return await handleHostsDelete(request, env);
       }
-      if (pathname === `${ADMIN_ROOT}/config` && request.method === "GET") {
+      if (normalizedPath === `${ADMIN_ROOT}/config` && request.method === "GET") {
         await requireAdminKey(request, env);
         return await handleConfigGet(env);
       }
-      if (pathname === `${ADMIN_ROOT}/config` && request.method === "PUT") {
+      if (normalizedPath === `${ADMIN_ROOT}/config` && request.method === "PUT") {
         await requireAdminKey(request, env);
         return await handleConfigPut(request, env);
       }
-      if (pathname === `${ADMIN_ROOT}/config/validate` && request.method === "POST") {
+      if (normalizedPath === `${ADMIN_ROOT}/config/validate` && request.method === "POST") {
         await requireAdminKey(request, env);
         return await handleConfigValidate(request, env);
       }
-      if (pathname === `${ADMIN_ROOT}/config/test-rule` && request.method === "POST") {
+      if (normalizedPath === `${ADMIN_ROOT}/config/test-rule` && request.method === "POST") {
         await requireAdminKey(request, env);
         return await handleConfigTestRule(request, env);
       }
-      if (pathname === `${ADMIN_ROOT}/headers` && request.method === "GET") {
+      if (normalizedPath === `${ADMIN_ROOT}/headers` && request.method === "GET") {
         await requireAdminKey(request, env);
         return await handleEnrichedHeadersList(env);
       }
-      if (pathname.startsWith(`${ADMIN_ROOT}/headers/`) && request.method === "PUT") {
+      if (normalizedPath.startsWith(`${ADMIN_ROOT}/headers/`) && request.method === "PUT") {
         await requireAdminKey(request, env);
-        const headerName = pathname.slice(`${ADMIN_ROOT}/headers/`.length);
+        const headerName = normalizedPath.slice(`${ADMIN_ROOT}/headers/`.length);
         return await handleEnrichedHeaderPut(request, env, headerName);
       }
-      if (pathname.startsWith(`${ADMIN_ROOT}/headers/`) && request.method === "DELETE") {
+      if (normalizedPath.startsWith(`${ADMIN_ROOT}/headers/`) && request.method === "DELETE") {
         await requireAdminKey(request, env);
-        const headerName = pathname.slice(`${ADMIN_ROOT}/headers/`.length);
+        const headerName = normalizedPath.slice(`${ADMIN_ROOT}/headers/`.length);
         return await handleEnrichedHeaderDelete(env, headerName);
       }
 
       return apiError(404, "NOT_FOUND", "Route not found");
     } catch (error) {
-      return renderError(error, pathname);
+      return renderError(error, normalizedPath);
     }
   },
 };
@@ -231,6 +232,13 @@ function toHttpError(error) {
     "Unhandled Worker error",
     { cause: String(error?.message || error) }
   );
+}
+
+function normalizePathname(pathname) {
+  const raw = String(pathname || "/");
+  if (raw === "/") return "/";
+  const trimmed = raw.replace(/\/+$/, "");
+  return trimmed || "/";
 }
 
 function getEnvInt(env, key, fallback) {

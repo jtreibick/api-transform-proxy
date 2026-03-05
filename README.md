@@ -14,9 +14,11 @@ Customer-self-hosted Worker that relays upstream API calls and optionally applie
 
 2. Open the Worker status page in your browser:
 - `https://your-worker.workers.dev/_apiproxy`
+- `https://your-worker.workers.dev/` also works.
 
 3. Bootstrap keys in your browser (first run only):
 - `https://your-worker.workers.dev/_apiproxy/init`
+- Trailing slashes are accepted on routes (for example `/_apiproxy/init/`).
 
 - If keys do not exist, the init page shows both:
   - `X-Admin-Key`
