@@ -42,6 +42,26 @@ Customer-self-hosted Worker that relays upstream API calls and optionally applie
 
 For curl-based API verification, use the **Smoke test sequence** section below.
 
+## Key management
+
+- Keys are shown only once on `GET /_apiproxy/init` when they are created.
+- If keys already exist, `GET /_apiproxy/init` will not reveal them again.
+
+Proxy key rotation:
+- Call `POST /_apiproxy/admin/rotate` with `X-Admin-Key`.
+- The endpoint returns the new proxy key once.
+- Old proxy key remains valid for a short overlap window (configurable by `ROTATE_OVERLAP_MS`).
+
+Admin key rotation:
+- Call `POST /_apiproxy/admin/rotate-admin` with current `X-Admin-Key`.
+- The endpoint returns the new admin key once.
+
+Recovery when admin key is lost:
+1. Open Cloudflare dashboard for this Worker.
+2. Open KV namespace `CONFIG`.
+3. Delete `admin_key` (and optionally `proxy_key`, `proxy_key_old`, `proxy_key_old_expires_at`).
+4. Revisit `/_apiproxy/init` to recreate missing keys.
+
 ## Contract Freeze (Step 1)
 
 ### Error response shape (all endpoints)
