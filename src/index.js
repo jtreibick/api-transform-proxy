@@ -1578,8 +1578,7 @@ async function handleInitPage(env, request) {
          <p>2. Open KV namespace <code>CONFIG</code>.</p>
          <p>3. Delete <code>admin_key</code> (and optionally <code>proxy_key</code>, <code>proxy_key_old</code>, <code>proxy_key_old_expires_at</code>).</p>
          <p>4. Refresh this page (<code>${RESERVED_ROOT}/init</code>) to recreate keys.</p>
-         <p style="color:#6b7280;">These recovery instructions are shown only when keys already exist and are hidden.</p>
-         ${curlExample}`
+         <p style="color:#6b7280;">These recovery instructions are shown only when keys already exist and are hidden.</p>`
       ),
       { headers: { "content-type": "text/html; charset=utf-8" } }
     );
