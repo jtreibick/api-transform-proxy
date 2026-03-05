@@ -1325,17 +1325,17 @@ async function handleStatusPage(env, request) {
       "API Transform Proxy",
       `<p><b>Status:</b> 🟢 Running</p>
        ${renderSecretField(
-         "Admin API Key",
+         "Admin API Secret (To administer this proxy)",
          "••••••••••••••••••••••••••••••••",
          "admin-api-secret-status",
-         "API Key previously created, keys cannot be viewed again.",
+         "Existing API Key (Previously Created). This key cannot be viewed. See instructions to rotate.",
          false
        )}
        ${renderSecretField(
-         "Proxy API Key",
+         "Requestor API Secret (To call this proxy)",
          "••••••••••••••••••••••••••••••••",
          "proxy-api-secret-status",
-         "API Key previously created, keys cannot be viewed again.",
+         "Existing API Key (Previously Created). This key cannot be viewed. See instructions to rotate.",
          false
        )}
        <p><b>How to reset keys</b><br />
@@ -1599,38 +1599,36 @@ async function handleInitPage(env, request) {
     );
   }
 
-  const createdNow = [
-    createdAdmin ? "Admin API Key" : null,
-    createdProxy ? "Proxy API Key" : null,
-  ]
-    .filter(Boolean)
-    .join(" and ");
-  const noKeysInitially = !existingProxy && !existingAdmin;
-
   return new Response(
     htmlPage(
-      "API Secrets",
-      `${noKeysInitially ? `<h1 style="margin:0 0 10px 0;font-size:1.4rem;">Copy these keys.</h1>` : ""}
-       <p><b>Created now:</b> ${escapeHtml(createdNow)}</p>
-       <p style="color:#b91c1c;font-weight:700;">
+      "API Transform Proxy",
+      `<div style="display:flex;align-items:center;gap:12px;margin:0 0 8px 0;">
+         <img src="${FAVICON_DATA_URL}" width="72" height="72" alt="API Transform Proxy icon" />
+       </div>
+       <div role="alert" style="border:1px solid #fecaca;background:#fff1f2;color:#7f1d1d;border-radius:10px;padding:10px 12px;margin:0 0 12px 0;">
+         <div style="font-weight:700;">Save these API keys now</div>
+         <div style="font-size:13px;">This is the only time they will be visible. Store them securely before leaving this page.</div>
+       </div>
+       <p style="color:#b91c1c;font-weight:700;margin:0 0 8px 0;">Copy these keys.</p>
+       <p><b>
          These API secrets will only be displayed on this page one time. Please copy and store them safely.
-       </p>
+       </b></p>
        ${renderSecretField(
-         "Admin API Secret",
+         "Admin API Secret (To administer this proxy)",
          createdAdmin || "••••••••••••••••••••••••••••••••",
          "admin-api-secret",
          createdAdmin
-           ? "API Key created, keys cannot be viewed again."
-           : "API Key previously created, keys cannot be viewed again.",
+           ? "Generated API Key (New). Copy to a safe place. This key cannot be viewed more than once."
+           : "Existing API Key (Previously Created). This key cannot be viewed. See instructions to rotate.",
          !!createdAdmin
        )}
        ${renderSecretField(
-         "Requestor API Secret",
+         "Requestor API Secret (To call this proxy)",
          createdProxy || "••••••••••••••••••••••••••••••••",
          "requestor-api-secret",
          createdProxy
-           ? "API Key created, keys cannot be viewed again."
-           : "API Key previously created, keys cannot be viewed again.",
+           ? "Generated API Key (New). Copy to a safe place. This key cannot be viewed more than once."
+           : "Existing API Key (Previously Created). This key cannot be viewed. See instructions to rotate.",
          !!createdProxy
        )}
        <p><b>How to reset keys</b><br />
