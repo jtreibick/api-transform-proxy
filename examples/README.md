@@ -4,8 +4,19 @@ Set variables:
 
 ```bash
 export WORKER_URL="https://your-worker.workers.dev"
-export PROXY_KEY="replace-with-your-key"
-export ADMIN_KEY="replace-with-admin-key"
+```
+
+Bootstrap keys first:
+
+```bash
+curl -sS "$WORKER_URL/_apiproxy/init"
+```
+
+Then set:
+
+```bash
+export PROXY_KEY="value-shown-by-init"
+export ADMIN_KEY="value-shown-by-init"
 ```
 
 ## 1) GET passthrough

@@ -3,16 +3,18 @@
  *
  * Endpoints:
  * - GET /_apiproxy               : status page (never initializes)
- * - GET /_apiproxy/init          : one-time key initialization
+ * - GET /_apiproxy/init          : bootstrap missing keys (shown once on creation)
  * - POST /_apiproxy/request      : authenticated relay + optional JSONata transform
  * - GET /_apiproxy/admin/version : build version info (admin key required)
  * - POST /_apiproxy/admin/rotate : authenticated key rotation (admin key required)
+ * - POST /_apiproxy/admin/rotate-admin : authenticated admin key rotation
  * - GET/PUT /_apiproxy/admin/config
  * - POST /_apiproxy/admin/config/validate
  * - POST /_apiproxy/admin/config/test-rule
  */
 
 const KV_PROXY_KEY = "proxy_key";
+const KV_ADMIN_KEY = "admin_key";
 const KV_PROXY_KEY_OLD = "proxy_key_old";
 const KV_PROXY_KEY_OLD_EXPIRES_AT = "proxy_key_old_expires_at";
 const KV_ALLOWED_HOSTS = "allowed_hosts";
@@ -132,52 +134,56 @@ export default {
         return await handleRequest(request, env);
       }
       if (pathname === `${ADMIN_ROOT}/version` && request.method === "GET") {
-        requireAdminKey(request, env);
+        await requireAdminKey(request, env);
         return handleVersion(env);
       }
       if (pathname === `${ADMIN_ROOT}/rotate` && request.method === "POST") {
-        requireAdminKey(request, env);
+        await requireAdminKey(request, env);
         return await handleRotate(request, env);
       }
+      if (pathname === `${ADMIN_ROOT}/rotate-admin` && request.method === "POST") {
+        await requireAdminKey(request, env);
+        return await handleRotateAdmin(request, env);
+      }
       if (pathname === `${ADMIN_ROOT}/hosts` && request.method === "GET") {
-        requireAdminKey(request, env);
+        await requireAdminKey(request, env);
         return await handleHostsGet(env);
       }
       if (pathname === `${ADMIN_ROOT}/hosts` && request.method === "POST") {
-        requireAdminKey(request, env);
+        await requireAdminKey(request, env);
         return await handleHostsPost(request, env);
       }
       if (pathname === `${ADMIN_ROOT}/hosts` && request.method === "DELETE") {
-        requireAdminKey(request, env);
+        await requireAdminKey(request, env);
         return await handleHostsDelete(request, env);
       }
       if (pathname === `${ADMIN_ROOT}/config` && request.method === "GET") {
-        requireAdminKey(request, env);
+        await requireAdminKey(request, env);
         return await handleConfigGet(env);
       }
       if (pathname === `${ADMIN_ROOT}/config` && request.method === "PUT") {
-        requireAdminKey(request, env);
+        await requireAdminKey(request, env);
         return await handleConfigPut(request, env);
       }
       if (pathname === `${ADMIN_ROOT}/config/validate` && request.method === "POST") {
-        requireAdminKey(request, env);
+        await requireAdminKey(request, env);
         return await handleConfigValidate(request, env);
       }
       if (pathname === `${ADMIN_ROOT}/config/test-rule` && request.method === "POST") {
-        requireAdminKey(request, env);
+        await requireAdminKey(request, env);
         return await handleConfigTestRule(request, env);
       }
       if (pathname === `${ADMIN_ROOT}/headers` && request.method === "GET") {
-        requireAdminKey(request, env);
+        await requireAdminKey(request, env);
         return await handleEnrichedHeadersList(env);
       }
       if (pathname.startsWith(`${ADMIN_ROOT}/headers/`) && request.method === "PUT") {
-        requireAdminKey(request, env);
+        await requireAdminKey(request, env);
         const headerName = pathname.slice(`${ADMIN_ROOT}/headers/`.length);
         return await handleEnrichedHeaderPut(request, env, headerName);
       }
       if (pathname.startsWith(`${ADMIN_ROOT}/headers/`) && request.method === "DELETE") {
-        requireAdminKey(request, env);
+        await requireAdminKey(request, env);
         const headerName = pathname.slice(`${ADMIN_ROOT}/headers/`.length);
         return await handleEnrichedHeaderDelete(env, headerName);
       }
@@ -1125,6 +1131,11 @@ async function getProxyKey(env) {
   return env.CONFIG.get(KV_PROXY_KEY);
 }
 
+async function getAdminKey(env) {
+  ensureKvBinding(env);
+  return env.CONFIG.get(KV_ADMIN_KEY);
+}
+
 async function getProxyKeyAuthState(env) {
   ensureKvBinding(env);
   const [current, old, oldExpiresAtRaw] = await Promise.all([
@@ -1163,14 +1174,14 @@ async function requireProxyKey(request, env) {
   throw new HttpError(401, "UNAUTHORIZED", "Missing or invalid X-Proxy-Key");
 }
 
-function requireAdminKey(request, env) {
-  const expected = String(env.ADMIN_KEY || "");
+async function requireAdminKey(request, env) {
+  const expected = await getAdminKey(env);
   if (!expected) {
     throw new HttpError(
       503,
       "ADMIN_NOT_CONFIGURED",
-      "ADMIN_KEY is not configured.",
-      { setup: "Set Worker env var ADMIN_KEY and redeploy." }
+      "Admin key is not initialized.",
+      { setup: `Visit ${RESERVED_ROOT}/init to bootstrap keys.` }
     );
   }
 
@@ -1280,17 +1291,19 @@ function resolveUpstreamUrl(rawUrl, proxyHostHeader) {
 
 async function handleStatusPage(env) {
   ensureKvBinding(env);
-  const existing = await env.CONFIG.get(KV_PROXY_KEY);
-  const initialized = !!existing;
+  const [proxyKey, adminKey] = await Promise.all([env.CONFIG.get(KV_PROXY_KEY), env.CONFIG.get(KV_ADMIN_KEY)]);
+  const proxyInitialized = !!proxyKey;
+  const adminInitialized = !!adminKey;
 
   return new Response(
     htmlPage(
       "API Transform Proxy",
-      `<p><b>Initialized:</b> ${initialized ? "yes" : "no"}</p>
+      `<p><b>Proxy key initialized:</b> ${proxyInitialized ? "yes" : "no"}</p>
+       <p><b>Admin key initialized:</b> ${adminInitialized ? "yes" : "no"}</p>
        <p><b>Next step:</b> ${
-         initialized
+         proxyInitialized && adminInitialized
            ? `Call <code>POST ${RESERVED_ROOT}/request</code> with header <code>X-Proxy-Key</code>.`
-           : `Visit <a href="${RESERVED_ROOT}/init">${RESERVED_ROOT}/init</a> to create your key.`
+           : `Visit <a href="${RESERVED_ROOT}/init">${RESERVED_ROOT}/init</a> to bootstrap missing keys.`
        }</p>
        <p><b>Docs:</b> Send JSON body with <code>upstream</code> and optional <code>transform</code> to <code>POST ${RESERVED_ROOT}/request</code>.</p>
        <p><b>Admin:</b> Use <code>${ADMIN_ROOT}/*</code> with header <code>X-Admin-Key</code>.</p>`
@@ -1520,31 +1533,52 @@ async function handleEnrichedHeaderDelete(env, headerNameRaw) {
 
 async function handleInitPage(env) {
   ensureKvBinding(env);
-  const existing = await env.CONFIG.get(KV_PROXY_KEY);
-  if (existing) {
+  const [existingProxy, existingAdmin] = await Promise.all([env.CONFIG.get(KV_PROXY_KEY), env.CONFIG.get(KV_ADMIN_KEY)]);
+  let createdProxy = null;
+  let createdAdmin = null;
+
+  if (!existingProxy) {
+    createdProxy = generateSecret();
+    await env.CONFIG.put(KV_PROXY_KEY, createdProxy);
+  }
+  if (!existingAdmin) {
+    createdAdmin = generateSecret();
+    await env.CONFIG.put(KV_ADMIN_KEY, createdAdmin);
+  }
+
+  if (!createdProxy && !createdAdmin) {
     return new Response(
       htmlPage(
         "Already initialized",
         `<p><b>Status:</b> initialized</p>
-         <p>Key already exists and is intentionally not shown again.</p>
-         <p>Use <code>POST ${ADMIN_ROOT}/rotate</code> with <code>X-Admin-Key</code> if you need a new key.</p>`
+         <p>Proxy and admin keys already exist and are intentionally not shown again.</p>
+         <p>Use <code>POST ${ADMIN_ROOT}/rotate</code> to rotate proxy key and <code>POST ${ADMIN_ROOT}/rotate-admin</code> to rotate admin key.</p>`
       ),
       { headers: { "content-type": "text/html; charset=utf-8" } }
     );
   }
 
-  const key = generateSecret();
-  await env.CONFIG.put(KV_PROXY_KEY, key);
-
   return new Response(
     htmlPage(
-      "Proxy key created",
+      "Bootstrap complete",
       `<p><b>Status:</b> initialized</p>
-       <p>Copy this key now and store it in Bubble as header <code>X-Proxy-Key</code>.</p>
+       ${
+         createdProxy
+           ? `<p>Copy this proxy key now and store it as <code>X-Proxy-Key</code>.</p>
        <pre style="padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-all;">${escapeHtml(
-         key
-       )}</pre>
-       <p>This key is only shown on first creation.</p>
+         createdProxy
+       )}</pre>`
+           : "<p>Proxy key was already initialized and is not shown again.</p>"
+       }
+       ${
+         createdAdmin
+           ? `<p>Copy this admin key now and store it as <code>X-Admin-Key</code>.</p>
+       <pre style="padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-all;">${escapeHtml(
+         createdAdmin
+       )}</pre>`
+           : "<p>Admin key was already initialized and is not shown again.</p>"
+       }
+       <p>These keys are only shown when first created.</p>
        <p><b>Next:</b> call <code>POST ${RESERVED_ROOT}/request</code>.</p>`
     ),
     { headers: { "content-type": "text/html; charset=utf-8" } }
@@ -1591,6 +1625,31 @@ async function handleRotate(request, env) {
       old_key_overlap_active: !!current && overlapMs > 0,
       old_key_overlap_ms: current ? Math.max(0, overlapMs) : 0,
     },
+  });
+}
+
+async function handleRotateAdmin(request, env) {
+  const newAdminKey = generateSecret();
+  await env.CONFIG.put(KV_ADMIN_KEY, newAdminKey);
+
+  const acceptsHtml = (request.headers.get("accept") || "").includes("text/html");
+  if (acceptsHtml) {
+    return new Response(
+      htmlPage(
+        "Admin key rotated",
+        `<p>Store this new admin key and replace the old value immediately.</p>
+         <pre style="padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-all;">${escapeHtml(
+           newAdminKey
+         )}</pre>`
+      ),
+      { headers: { "content-type": "text/html; charset=utf-8" } }
+    );
+  }
+
+  return jsonResponse(200, {
+    ok: true,
+    data: { new_admin_key: newAdminKey },
+    meta: { rotated_admin_key: true },
   });
 }
 

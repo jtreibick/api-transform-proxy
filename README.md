@@ -57,7 +57,6 @@ header_forwarding:
 
 - `CONFIG` KV binding must exist and be bound in `wrangler.toml`.
 - `jsonata` and `yaml` must be installed from `package.json` dependencies.
-- Set Worker variable `ADMIN_KEY` for admin endpoints under `/_apiproxy/admin/*`.
 - Optional: set Worker variable `BUILD_VERSION` (for `GET /_apiproxy/admin/version`), e.g. a git SHA or release tag.
 - Optional: set `ALLOWED_HOSTS` as comma-separated hosts. Admin-managed hosts are stored in KV and merged with this list.
 - Optional: set `ROTATE_OVERLAP_MS` (default `600000`) to keep old proxy key valid briefly after rotation.
@@ -80,9 +79,11 @@ binding = "CONFIG"
   - Requires header `X-Admin-Key`.
   - Uses `BUILD_VERSION` env var, defaults to `dev` if unset.
 - `GET /_apiproxy/init`
-  - Creates `proxy_key` once if not initialized.
-  - Shows the generated key exactly once.
-  - If already initialized, does not reveal key.
+  - Bootstraps missing keys:
+    - `proxy_key` for `X-Proxy-Key`
+    - `admin_key` for `X-Admin-Key`
+  - Shows each key once at creation time.
+  - If both already exist, keys are not shown.
 - `POST /_apiproxy/request`
   - Requires header `X-Proxy-Key`.
   - Requires `Content-Type: application/json`.
@@ -99,6 +100,9 @@ binding = "CONFIG"
   - Requires header `X-Admin-Key`.
   - Rotates key and returns new key once.
   - During overlap window, old key is accepted temporarily (`proxy_key_old` + expiry in KV).
+- `POST /_apiproxy/admin/rotate-admin`
+  - Requires header `X-Admin-Key`.
+  - Rotates admin key and returns the new admin key once.
 - `GET /_apiproxy/admin/hosts`
   - Requires header `X-Admin-Key`.
   - Returns `managed_hosts`, `env_hosts`, and merged `effective_hosts`.
@@ -194,8 +198,19 @@ Set variables:
 
 ```bash
 export WORKER_URL="https://your-worker.workers.dev"
-export ADMIN_KEY="replace-with-admin-key"
-export PROXY_KEY="replace-with-proxy-key"
+```
+
+Bootstrap keys first (shown once when created):
+
+```bash
+curl -sS "$WORKER_URL/_apiproxy/init"
+```
+
+Then set:
+
+```bash
+export ADMIN_KEY="value-shown-by-init"
+export PROXY_KEY="value-shown-by-init"
 ```
 
 1) Validate config YAML (no persistence):
@@ -253,7 +268,7 @@ curl -sS "$WORKER_URL/_apiproxy/request" \
 ## Acceptance checklist
 
 - `GET /_apiproxy` never creates keys.
-- `GET /_apiproxy/init` creates key once; second call does not reveal key.
+- `GET /_apiproxy/init` creates missing proxy/admin keys once; subsequent calls do not reveal existing keys.
 - `/request` rejects missing proxy auth key with consistent error shape.
 - Host resolution follows config:
   - `targetHost` set => rejects `X-Proxy-Host`.
