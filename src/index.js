@@ -135,7 +135,7 @@ export default {
 
     try {
       if ((normalizedPath === "/" || normalizedPath === RESERVED_ROOT) && request.method === "GET") {
-        return await handleStatusPage(env, request);
+        return await handleStatusPage(env);
       }
       if (normalizedPath === `${RESERVED_ROOT}/init` && request.method === "GET") {
         return await handleInitPage(env, request);
@@ -1306,26 +1306,22 @@ function resolveUpstreamUrl(rawUrl, proxyHostHeader) {
   }
 }
 
-async function handleStatusPage(env, request) {
+async function handleStatusPage(env) {
   ensureKvBinding(env);
   const [proxyKey, adminKey] = await Promise.all([env.CONFIG.get(KV_PROXY_KEY), env.CONFIG.get(KV_ADMIN_KEY)]);
   const proxyInitialized = !!proxyKey;
   const adminInitialized = !!adminKey;
-  const curlExample = renderRequestCurlExample(new URL(request.url).origin);
 
   return new Response(
     htmlPage(
       "API Transform Proxy",
       `<p><b>Proxy key initialized:</b> ${proxyInitialized ? "yes" : "no"}</p>
        <p><b>Admin key initialized:</b> ${adminInitialized ? "yes" : "no"}</p>
-       <p><b>Next step:</b> ${
+       <p>${
          proxyInitialized && adminInitialized
-           ? `Call <code>POST ${RESERVED_ROOT}/request</code> with header <code>X-Proxy-Key</code>.`
+           ? `Next step: call <code>POST ${RESERVED_ROOT}/request</code> with header <code>X-Proxy-Key</code>.`
            : `Visit <a href="${RESERVED_ROOT}/init">${RESERVED_ROOT}/init</a> to bootstrap missing keys.`
-       }</p>
-       <p><b>Docs:</b> Send JSON body with <code>upstream</code> and optional <code>transform</code> to <code>POST ${RESERVED_ROOT}/request</code>.</p>
-       <p><b>Admin:</b> Use <code>${ADMIN_ROOT}/*</code> with header <code>X-Admin-Key</code>.</p>
-       ${curlExample}`
+       }</p>`
     ),
     { headers: { "content-type": "text/html; charset=utf-8" } }
   );
