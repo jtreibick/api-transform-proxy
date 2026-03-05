@@ -1,0 +1,39 @@
+targetHost: null
+
+transform:
+  enabled: true
+  defaultExpr: |
+    {
+      "ok": true,
+      "status": status,
+      "data": body
+    }
+  fallback: transform_default
+  rules:
+    - name: errors_json
+      status: [4xx, 5xx]
+      type: json
+      expr: |
+        {
+          "ok": false,
+          "status": status,
+          "error": body
+        }
+
+header_forwarding:
+  mode: blacklist
+  names:
+    - connection
+    - keep-alive
+    - proxy-authenticate
+    - proxy-authorization
+    - te
+    - trailer
+    - transfer-encoding
+    - upgrade
+    - host
+    - content-length
+    - x-proxy-key
+    - x-admin-key
+    - x-proxy-host
+    - xproxyhost

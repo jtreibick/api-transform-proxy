@@ -1,0 +1,11 @@
+{
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "error": "Not Found"
+    }
+  }
+}

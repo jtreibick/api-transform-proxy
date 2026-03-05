@@ -4,10 +4,63 @@
 
 Customer-self-hosted Worker that relays upstream API calls and optionally applies a JSONata transform.
 
+## Contract Freeze (Step 1)
+
+### Error response shape (all endpoints)
+
+```json
+{
+  "error": {
+    "code": "UPPER_SNAKE_CASE",
+    "message": "Human-readable summary",
+    "details": {}
+  }
+}
+```
+
+Notes:
+- `error.code` and `error.message` are always present.
+- `error.details` is optional.
+- Some endpoints may include optional top-level `meta`.
+
+### Root config schema (v1 draft)
+
+```yaml
+targetHost: api.vendor.com # string or null
+
+transform:
+  enabled: true
+  defaultExpr: ""
+  fallback: passthrough # passthrough | error | transform_default
+  rules:
+    - name: errors_json
+      status: [4xx, 5xx, 422] # mix classes + exact codes
+      type: json              # json | text | binary | any
+      headerMatch:
+        x-api-mode: legacy    # optional
+      expr: |
+        { "ok": false, "status": status, "error": body }
+
+header_forwarding:
+  mode: blacklist            # blacklist | whitelist
+  names:
+    - connection
+    - host
+    - content-length
+    - x-proxy-key
+    - x-admin-key
+    - x-proxy-host
+    - xproxyhost
+```
+
 ## Required setup
 
 - `CONFIG` KV binding must exist and be bound in `wrangler.toml`.
-- `jsonata` must be installed from `package.json` dependencies.
+- `jsonata` and `yaml` must be installed from `package.json` dependencies.
+- Set Worker variable `ADMIN_KEY` for admin endpoints under `/_apiproxy/admin/*`.
+- Optional: set Worker variable `BUILD_VERSION` (for `GET /_apiproxy/admin/version`), e.g. a git SHA or release tag.
+- Optional: set `ALLOWED_HOSTS` as comma-separated hosts. Admin-managed hosts are stored in KV and merged with this list.
+- Optional: set `ROTATE_OVERLAP_MS` (default `600000`) to keep old proxy key valid briefly after rotation.
 
 `wrangler.toml` should include:
 
@@ -18,52 +71,194 @@ binding = "CONFIG"
 
 ## Endpoints
 
-- `GET /`
+- `GET /_apiproxy`
   - Status page only.
   - Never creates or rotates keys.
   - Shows initialized state and next step.
-- `GET /init`
+- `GET /_apiproxy/admin/version`
+  - Returns the deployed build version as JSON.
+  - Requires header `X-Admin-Key`.
+  - Uses `BUILD_VERSION` env var, defaults to `dev` if unset.
+- `GET /_apiproxy/init`
   - Creates `proxy_key` once if not initialized.
   - Shows the generated key exactly once.
   - If already initialized, does not reveal key.
-- `POST /invoke`
+- `POST /_apiproxy/request`
   - Requires header `X-Proxy-Key`.
   - Requires `Content-Type: application/json`.
+  - Host resolution is config-driven:
+    - if `targetHost` is set in admin config, it is always used and `X-Proxy-Host` is rejected (`HOST_OVERRIDE_NOT_ALLOWED`).
+    - if `targetHost` is unset, `X-Proxy-Host` (or `XProxyHost`) is required (`MISSING_UPSTREAM_HOST`).
+  - When host is provided by config/header, `upstream.url` may be relative (for example `/v1/customers`).
+  - Forwarding behavior is config-driven by `header_forwarding.mode` + `header_forwarding.names`.
+  - Enriched headers are injected last and override both forwarded incoming headers and per-request `upstream.headers`.
   - Relays request to upstream and returns envelope:
     - success: `{ "ok": true, "data": ..., "meta": { ... } }`
-    - error: `{ "ok": false, "error": { "code": ..., "message": ... }, "meta": { ... } }`
-- `POST /rotate`
-  - Requires current `X-Proxy-Key`.
+    - error: `{ "error": { "code": ..., "message": ..., "details?": ... }, "meta?": { ... } }`
+- `POST /_apiproxy/admin/rotate`
+  - Requires header `X-Admin-Key`.
   - Rotates key and returns new key once.
+  - During overlap window, old key is accepted temporarily (`proxy_key_old` + expiry in KV).
+- `GET /_apiproxy/admin/hosts`
+  - Requires header `X-Admin-Key`.
+  - Returns `managed_hosts`, `env_hosts`, and merged `effective_hosts`.
+- `POST /_apiproxy/admin/hosts`
+  - Requires header `X-Admin-Key`.
+  - Body: `{ "host": "api.vendor.com" }` or `{ "host": "https://api.vendor.com" }`
+  - Adds host to KV-managed allowlist.
+- `DELETE /_apiproxy/admin/hosts?host=api.vendor.com`
+  - Requires header `X-Admin-Key`.
+  - Removes host from KV-managed allowlist.
+- `GET /_apiproxy/admin/config`
+  - Requires header `X-Admin-Key`.
+  - Returns current config YAML (`text/yaml`).
+- `PUT /_apiproxy/admin/config`
+  - Requires header `X-Admin-Key`.
+  - Accepts config YAML in request body.
+  - Validates and persists normalized config to KV.
+- `POST /_apiproxy/admin/config/validate`
+  - Requires header `X-Admin-Key`.
+  - Accepts config YAML body.
+  - Returns normalized config without saving.
+- `POST /_apiproxy/admin/config/test-rule`
+  - Requires header `X-Admin-Key`.
+  - Accepts JSON with optional `config_yaml` or `config`, plus required sample `response`.
+  - Returns matched rule, expression source, fallback behavior, transform output, and rule-match trace.
+- `GET /_apiproxy/admin/headers`
+  - Requires header `X-Admin-Key`.
+  - Returns enriched header names only (never values): `{ "enriched_headers": ["authorization", "..."] }`.
+- `PUT /_apiproxy/admin/headers/:name`
+  - Requires header `X-Admin-Key`.
+  - Requires `Content-Type: application/json` with body `{ "value": "..." }`.
+  - Creates/updates one enriched upstream header value.
+  - Response includes updated `{ "enriched_headers": [...] }`.
+- `DELETE /_apiproxy/admin/headers/:name`
+  - Requires header `X-Admin-Key`.
+  - Deletes one enriched upstream header.
+  - Response includes updated `{ "enriched_headers": [...] }`.
 
-## /invoke request shape
+Header precedence in runtime requests:
+1. Forwarded incoming headers (based on `header_forwarding` policy)
+2. `upstream.headers` from request body (overrides forwarded)
+3. Enriched headers from admin storage (override all)
+
+## /request body shape
 
 ```json
 {
   "upstream": {
     "method": "GET",
-    "url": "https://api.example.com/resource",
+    "url": "/resource",
     "headers": { "Authorization": "Bearer ..." },
     "body": { "type": "none" }
-  },
-  "transform": {
-    "expr": "body.items.{\"id\": id}",
-    "when": {
-      "status": { "allow": ["2xx"] },
-      "content_type": { "allow": ["application/json", "application/*+json"] },
-      "max_response_bytes": 500000
-    }
   }
 }
 ```
 
+`/request` transforms are now selected from admin config (`/_apiproxy/admin/config`) rather than request-body transform expressions.
+
+Example with `X-Proxy-Host`:
+
+```bash
+curl -sS "$WORKER_URL/_apiproxy/request" \
+  -H "Content-Type: application/json" \
+  -H "X-Proxy-Key: $PROXY_KEY" \
+  -H "X-Proxy-Host: https://api.example.com" \
+  --data '{"upstream":{"method":"GET","url":"/v1/customers"}}'
+```
+
 ## Important behavior
 
-- `/invoke` returns structured validation errors for malformed payloads (`INVALID_REQUEST`) with:
+- `/request` returns structured validation errors for malformed payloads (`INVALID_REQUEST`) with:
   - `details.expected`
   - `details.problems[]`
   - `details.received` snippet
 - Transform errors are explicit:
-  - `NON_JSON_RESPONSE` (422) when transform requested but upstream is not JSON.
+  - `NON_JSON_RESPONSE` (422) when selected transform runs against invalid/unparseable JSON.
   - `TRANSFORM_ERROR` (422) when JSONata evaluation fails.
 - Startup/runtime hard failures are wrapped by top-level error handling to avoid opaque Worker crashes.
+- Key rotation uses a dual-key overlap window to avoid immediate client lockout during key propagation.
+
+## Migration notes
+
+- Request-body `transform` expressions are no longer the primary runtime transform path.
+- Runtime transform behavior is now selected from admin YAML config at `/_apiproxy/admin/config`.
+- Existing request payloads with `upstream` continue to work.
+- `X-Proxy-Host` behavior is controlled by `targetHost`:
+  - `targetHost` set: header is rejected (`HOST_OVERRIDE_NOT_ALLOWED`).
+  - `targetHost` unset/null: header is required (`MISSING_UPSTREAM_HOST`).
+
+## Smoke test sequence
+
+Set variables:
+
+```bash
+export WORKER_URL="https://your-worker.workers.dev"
+export ADMIN_KEY="replace-with-admin-key"
+export PROXY_KEY="replace-with-proxy-key"
+```
+
+1) Validate config YAML (no persistence):
+
+```bash
+curl -sS -X POST "$WORKER_URL/_apiproxy/admin/config/validate" \
+  -H "X-Admin-Key: $ADMIN_KEY" \
+  -H "Content-Type: text/yaml" \
+  --data-binary @examples/config-basic.yaml
+```
+
+2) Save config YAML:
+
+```bash
+curl -sS -X PUT "$WORKER_URL/_apiproxy/admin/config" \
+  -H "X-Admin-Key: $ADMIN_KEY" \
+  -H "Content-Type: text/yaml" \
+  --data-binary @examples/config-basic.yaml
+```
+
+3) Test transform rule matcher:
+
+```bash
+curl -sS -X POST "$WORKER_URL/_apiproxy/admin/config/test-rule" \
+  -H "X-Admin-Key: $ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  --data @examples/test-rule-4xx.json
+```
+
+4) Set/list/delete enriched headers:
+
+```bash
+curl -sS -X PUT "$WORKER_URL/_apiproxy/admin/headers/authorization" \
+  -H "X-Admin-Key: $ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  --data '{"value":"Bearer SECRET_TOKEN"}'
+
+curl -sS "$WORKER_URL/_apiproxy/admin/headers" \
+  -H "X-Admin-Key: $ADMIN_KEY"
+
+curl -sS -X DELETE "$WORKER_URL/_apiproxy/admin/headers/authorization" \
+  -H "X-Admin-Key: $ADMIN_KEY"
+```
+
+5) Run request path:
+
+```bash
+curl -sS "$WORKER_URL/_apiproxy/request" \
+  -H "Content-Type: application/json" \
+  -H "X-Proxy-Key: $PROXY_KEY" \
+  -H "X-Proxy-Host: https://httpbin.org" \
+  --data '{"upstream":{"method":"GET","url":"/json"}}'
+```
+
+## Acceptance checklist
+
+- `GET /_apiproxy` never creates keys.
+- `GET /_apiproxy/init` creates key once; second call does not reveal key.
+- `/request` rejects missing proxy auth key with consistent error shape.
+- Host resolution follows config:
+  - `targetHost` set => rejects `X-Proxy-Host`.
+  - `targetHost` unset => requires `X-Proxy-Host`.
+- `PUT /_apiproxy/admin/config` rejects unknown fields (`INVALID_CONFIG`).
+- `POST /_apiproxy/admin/config/test-rule` returns deterministic `trace`.
+- `GET /_apiproxy/admin/headers` returns names only, never secret values.
+- `header_forwarding` policy is applied and enriched headers override downstream.
