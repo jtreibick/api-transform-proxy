@@ -101,10 +101,6 @@ debug:
     - authorization
     - cookie
     - x-proxy-key
-  loggingEndpoint:
-    url: null               # optional https URL for debug trace forwarding
-    auth_header: null       # optional header name for logging URL auth
-    auth_value: null        # optional header value for logging URL auth
 
 transform:
   enabled: true
@@ -230,14 +226,14 @@ wrangler secret put TARGET_AUTH_BEARER
   - Requires header `X-Admin-Key`.
   - Returns most recent debug trace captured in this Worker instance.
   - `Accept: text/plain` returns plain text trace.
-- `PUT /_apiproxy/admin/debug/loggingEndpoint`
+- `PUT /_apiproxy/admin/debug/loggingSecret`
   - Requires header `X-Admin-Key`.
   - Requires `Content-Type: application/json`.
-  - Updates debug logging URL config in YAML/KV.
-  - Body: `{ "loggingEndpoint": { "url": "https://...", "auth_header": "x-api-key", "auth_value": "..." } }`
-- `DELETE /_apiproxy/admin/debug/loggingEndpoint`
+  - Stores logging auth secret in KV.
+  - Body: `{ "value": "..." }`
+- `DELETE /_apiproxy/admin/debug/loggingSecret`
   - Requires header `X-Admin-Key`.
-  - Clears debug logging endpoint URL/auth settings.
+  - Removes logging auth secret from KV.
 - `POST /_apiproxy/request`
   - Requires header `X-Proxy-Key`.
   - Requires `Content-Type: application/json`.

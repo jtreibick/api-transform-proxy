@@ -12,18 +12,21 @@
  * - POST /_apiproxy/admin/config/test-rule
  * - GET/PUT/DELETE /_apiproxy/admin/debug
  * - GET /_apiproxy/admin/debug/last
- * - PUT/DELETE /_apiproxy/admin/debug/loggingEndpoint
+ * - PUT/DELETE /_apiproxy/admin/debug/loggingSecret
  */
 
 const KV_PROXY_KEY = "proxy_key";
 const KV_ADMIN_KEY = "admin_key";
 const KV_PROXY_KEY_OLD = "proxy_key_old";
 const KV_PROXY_KEY_OLD_EXPIRES_AT = "proxy_key_old_expires_at";
+const KV_PROXY_KEY_ROTATED_AT = "proxy_key_rotated_at";
+const KV_ADMIN_KEY_ROTATED_AT = "admin_key_rotated_at";
 const KV_CONFIG_YAML = "config_yaml_v1";
 const KV_CONFIG_JSON = "config_json_v1";
 const KV_ENRICHED_HEADER_PREFIX = "enriched_header:";
 const KV_BOOTSTRAP_ENRICHED_HEADER_NAMES = "bootstrap_enriched_header_names_v1";
 const KV_DEBUG_ENABLED_UNTIL_MS = "debug_enabled_until_ms";
+const KV_DEBUG_LOGGING_SECRET = "debug_logging_secret";
 const RESERVED_ROOT = "/_apiproxy";
 const ADMIN_ROOT = `${RESERVED_ROOT}/admin`;
 const DEFAULT_DOCS_URL = "https://github.com/jtreibick/api-transform-proxy/blob/main/README.md";
@@ -186,6 +189,10 @@ export default {
         await requireAdminKey(request, env);
         return await handleRotateAdmin(request, env);
       }
+      if (normalizedPath === `${ADMIN_ROOT}/keys` && request.method === "GET") {
+        await requireAdminKey(request, env);
+        return await handleKeysStatusGet(env);
+      }
       if (normalizedPath === `${ADMIN_ROOT}/config` && request.method === "GET") {
         await requireAdminKey(request, env);
         return await handleConfigGet(env);
@@ -218,13 +225,13 @@ export default {
         await requireAdminKey(request, env);
         return await handleDebugLastGet(request);
       }
-      if (normalizedPath === `${ADMIN_ROOT}/debug/loggingEndpoint` && request.method === "PUT") {
+      if (normalizedPath === `${ADMIN_ROOT}/debug/loggingSecret` && request.method === "PUT") {
         await requireAdminKey(request, env);
-        return await handleDebugLoggingEndpointPut(request, env);
+        return await handleDebugLoggingSecretPut(request, env);
       }
-      if (normalizedPath === `${ADMIN_ROOT}/debug/loggingEndpoint` && request.method === "DELETE") {
+      if (normalizedPath === `${ADMIN_ROOT}/debug/loggingSecret` && request.method === "DELETE") {
         await requireAdminKey(request, env);
-        return await handleDebugLoggingEndpointDelete(env);
+        return await handleDebugLoggingSecretDelete(env);
       }
       if (normalizedPath === `${ADMIN_ROOT}/headers` && request.method === "GET") {
         await requireAdminKey(request, env);
@@ -1618,6 +1625,44 @@ function handleVersion(env) {
   });
 }
 
+function parseMs(raw) {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+async function handleKeysStatusGet(env) {
+  const now = Date.now();
+  const [proxyKey, proxyKeyOld, proxyOldExpiresAtRaw, proxyRotatedAtRaw, adminKey, adminRotatedAtRaw] = await Promise.all([
+    env.CONFIG.get(KV_PROXY_KEY),
+    env.CONFIG.get(KV_PROXY_KEY_OLD),
+    env.CONFIG.get(KV_PROXY_KEY_OLD_EXPIRES_AT),
+    env.CONFIG.get(KV_PROXY_KEY_ROTATED_AT),
+    env.CONFIG.get(KV_ADMIN_KEY),
+    env.CONFIG.get(KV_ADMIN_KEY_ROTATED_AT),
+  ]);
+  const proxyOldExpiresAt = parseMs(proxyOldExpiresAtRaw);
+  const proxyOldActive = !!proxyKeyOld && proxyOldExpiresAt > now;
+  const proxyRotatedAt = parseMs(proxyRotatedAtRaw);
+  const adminRotatedAt = parseMs(adminRotatedAtRaw);
+
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      proxy: {
+        primary_active: !!proxyKey,
+        secondary_active: proxyOldActive,
+        secondary_expires_at_ms: proxyOldActive ? proxyOldExpiresAt : 0,
+        last_rotated_at_ms: proxyRotatedAt,
+      },
+      admin: {
+        primary_active: !!adminKey,
+        last_rotated_at_ms: adminRotatedAt,
+      },
+    },
+    meta: {},
+  });
+}
+
 async function handleConfigGet(env) {
   const yamlText = await loadConfigYamlV1(env);
   return new Response(yamlText, {
@@ -1918,55 +1963,31 @@ async function handleDebugLastGet(request) {
   });
 }
 
-async function handleDebugLoggingEndpointPut(request, env) {
+async function handleDebugLoggingSecretPut(request, env) {
   enforceInvokeContentType(request);
   const body = await readJsonWithLimit(request, getEnvInt(env, "MAX_REQ_BYTES", DEFAULTS.MAX_REQ_BYTES));
-  const config = await loadConfigV1(env);
-  const sinkInput = body?.loggingEndpoint || {};
-  if (!isPlainObject(sinkInput)) {
-    throw new HttpError(400, "INVALID_REQUEST", "loggingEndpoint must be an object", {
-      expected: { loggingEndpoint: { url: "https://...", auth_header: "x-api-key", auth_value: "value" } },
+  const value = String(body?.value || "").trim();
+  if (!value) {
+    throw new HttpError(400, "INVALID_REQUEST", "value is required", {
+      expected: { value: "secret-string" },
     });
   }
-  const next = JSON.parse(JSON.stringify(config));
-  next.debug = next.debug || {};
-  next.debug.loggingEndpoint = {
-    url: sinkInput.url ?? null,
-    auth_header: sinkInput.auth_header ?? null,
-    auth_value: sinkInput.auth_value ?? null,
-  };
-  const saved = await saveConfigObjectV1(next, env);
+  await env.CONFIG.put(KV_DEBUG_LOGGING_SECRET, value);
   return jsonResponse(200, {
     ok: true,
     data: {
-      debug_loggingEndpoint: {
-        url: saved.debug.loggingEndpoint.url,
-        auth_header: saved.debug.loggingEndpoint.auth_header,
-        auth_value_set: !!saved.debug.loggingEndpoint.auth_value,
-      },
+      logging_secret_set: true,
     },
     meta: {},
   });
 }
 
-async function handleDebugLoggingEndpointDelete(env) {
-  const config = await loadConfigV1(env);
-  const next = JSON.parse(JSON.stringify(config));
-  next.debug = next.debug || {};
-  next.debug.loggingEndpoint = {
-    url: null,
-    auth_header: null,
-    auth_value: null,
-  };
-  const saved = await saveConfigObjectV1(next, env);
+async function handleDebugLoggingSecretDelete(env) {
+  await env.CONFIG.delete(KV_DEBUG_LOGGING_SECRET);
   return jsonResponse(200, {
     ok: true,
     data: {
-      debug_loggingEndpoint: {
-        url: saved.debug.loggingEndpoint.url,
-        auth_header: saved.debug.loggingEndpoint.auth_header,
-        auth_value_set: !!saved.debug.loggingEndpoint.auth_value,
-      },
+      logging_secret_set: false,
     },
     meta: {},
   });
@@ -1975,15 +1996,15 @@ async function handleDebugLoggingEndpointDelete(env) {
 function handleAdminPage() {
   return new Response(
     htmlPage(
-      "Admin Console",
-      `<div style="margin-bottom:10px;">
-         <img src="${FAVICON_DATA_URL}" width="48" height="48" alt="API Transform Proxy icon" />
-       </div>
-       <div id="saved-storage-warning" style="display:none;padding:10px 12px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:8px;margin:10px 0;">
-         ⛔️ Admin key saved on this device. Remove it when done.
+      "",
+      `<div id="saved-storage-warning" style="display:none;padding:10px 12px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:8px;margin:0 0 12px 0;">
+         ⛔️ Admin key saved on this device. Remove it with "Forget key" when done.
          <a href="#" id="remove-local-key-link" style="color:#991b1b;text-decoration:underline;">Remove it</a>
        </div>
-       <p>Authenticate with your admin key to access proxy administration tools.</p>
+       <div style="margin-bottom:10px;">
+         <img src="${FAVICON_DATA_URL}" width="48" height="48" alt="API Transform Proxy icon" />
+       </div>
+       <h1 style="margin:0 0 10px 0;font-size:30px;">Admin Console</h1>
        <div id="admin-warning" style="display:none;padding:10px 12px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:8px;margin:10px 0;"></div>
        <div id="admin-auth" style="margin:12px 0;">
          <label for="admin-key" style="display:block;font-weight:700;margin-bottom:6px;">Admin API Key</label>
@@ -2003,45 +2024,32 @@ function handleAdminPage() {
          <div id="admin-nav" style="display:flex;flex-direction:column;gap:8px;min-width:220px;">
            <button type="button" class="tab-btn" data-tab="overview">Status</button>
            <button type="button" class="tab-btn" data-tab="config">Config</button>
-           <button type="button" class="tab-btn" data-tab="debug">Debug</button>
+           <button type="button" class="tab-btn" data-tab="debug">Logging</button>
            <button type="button" class="tab-btn" data-tab="headers">Enrichments</button>
            <button type="button" class="tab-btn" data-tab="keys">API Access Keys</button>
          </div>
          <div style="flex:1;min-width:0;">
          <div id="tab-overview" class="tab-panel">
            <p><b>Status</b></p>
-           <p><b>Config YAML (source of truth)</b></p>
-           <pre id="overview-config-output" style="padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;max-height:280px;overflow:auto;">Click "Refresh status".</pre>
-           <p><b>Operational status (live runtime)</b></p>
-           <pre id="overview-output" style="padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Click "Refresh status".</pre>
+           <div id="overview-output" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;">Click "Refresh status".</div>
            <button type="button" id="overview-refresh-btn">Refresh status</button>
          </div>
          <div id="tab-debug" class="tab-panel" style="display:none;">
-           <p><b>Debug controls</b></p>
-           <label for="ttl-seconds" style="display:block;margin:8px 0 6px;">TTL seconds</label>
-           <input id="ttl-seconds" type="number" min="1" step="1" value="3600"
-             style="width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+           <p><b>Logging controls</b></p>
            <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
-             <button type="button" id="debug-refresh-btn">Refresh status</button>
              <button type="button" id="debug-enable-btn">Enable debug</button>
              <button type="button" id="debug-disable-btn">Disable debug</button>
-             <button type="button" id="debug-load-trace-btn">Load last trace</button>
            </div>
-           <p style="margin-top:16px;"><b>Debug logging</b></p>
-           <label for="logging-url" style="display:block;margin:8px 0 4px;">Logging Endpoint URL</label>
-           <input id="logging-url" type="text" placeholder="https://example.com/log"
-             style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
-           <label for="logging-auth-header" style="display:block;margin:2px 0 4px;">Logging Auth Header (optional)</label>
-           <input id="logging-auth-header" type="text" placeholder="x-api-key (optional)"
-             style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
-           <label for="logging-auth-value" style="display:block;margin:2px 0 4px;">Logging Auth Value (optional)</label>
-           <input id="logging-auth-value" type="password" placeholder="secret value (optional)"
+           <p style="margin-top:16px;"><b>Logging auth secret</b></p>
+           <label for="logging-secret" style="display:block;margin:8px 0 4px;">Secret value</label>
+           <input id="logging-secret" type="password" placeholder="set logging auth secret"
              style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-             <button type="button" id="logging-save-btn">Save logging</button>
-             <button type="button" id="logging-delete-btn">Delete logging</button>
+             <button type="button" id="logging-secret-save-btn">Save secret</button>
+             <button type="button" id="logging-secret-delete-btn">Delete secret</button>
            </div>
            <pre id="logging-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Logging output appears here.</pre>
+           <p style="margin-top:10px;"><a href="#" id="debug-refresh-trace-link">Refresh last trace</a></p>
            <pre id="debug-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;">Debug output appears here.</pre>
          </div>
          <div id="tab-config" class="tab-panel" style="display:none;">
@@ -2059,22 +2067,26 @@ function handleAdminPage() {
              style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">{"sample":{"status":500,"headers":{"content-type":"application/json"},"type":"json","body":{"error":"bad"}}}</textarea>
            <pre id="config-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Config output appears here.</pre>
          </div>
-        <div id="tab-headers" class="tab-panel" style="display:none;">
+         <div id="tab-headers" class="tab-panel" style="display:none;">
            <p><b>Enrichments</b></p>
            <input id="header-name" type="text" placeholder="authorization"
              style="width:100%;max-width:460px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
-           <input id="header-value" type="password" placeholder="header secret value"
-             style="width:100%;max-width:460px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
-           <div style="display:flex;gap:8px;flex-wrap:wrap;">
-             <button type="button" id="headers-list-btn">List headers</button>
-             <button type="button" id="headers-save-btn">Set header</button>
-             <button type="button" id="headers-delete-btn">Delete header</button>
+           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+             <input id="header-value" type="password" placeholder="header secret value"
+               style="width:100%;max-width:360px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
+             <button type="button" id="header-value-toggle-btn" style="margin-bottom:8px;">Show</button>
            </div>
+           <div style="display:flex;gap:8px;flex-wrap:wrap;">
+             <button type="button" id="headers-save-btn">Add header</button>
+           </div>
+           <div id="headers-list" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;"></div>
            <pre id="headers-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Header output appears here.</pre>
          </div>
          <div id="tab-keys" class="tab-panel" style="display:none;">
            <p><b>Key rotation</b></p>
+           <div id="keys-status" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin-bottom:10px;">Key status will appear here.</div>
            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+             <button type="button" id="keys-refresh-btn">Refresh key status</button>
              <button type="button" id="rotate-proxy-btn">Rotate proxy key</button>
              <button type="button" id="rotate-admin-btn">Rotate admin key</button>
            </div>
@@ -2098,12 +2110,19 @@ function handleAdminPage() {
            <button type="button" id="save-key-confirm-btn">I Understand, Save</button>
          </div>
        </dialog>
+       <dialog id="delete-header-modal" style="max-width:420px;border:1px solid #e2e8f0;border-radius:10px;padding:16px;">
+         <p style="margin-top:0;"><b>Delete enrichment?</b></p>
+         <p id="delete-header-modal-text" style="margin:8px 0 12px 0;"></p>
+         <div style="display:flex;gap:8px;justify-content:flex-end;">
+           <button type="button" id="delete-header-cancel-btn">Cancel</button>
+           <button type="button" id="delete-header-confirm-btn">Delete</button>
+         </div>
+       </dialog>
        <script>
          const ADMIN_ROOT = '${ADMIN_ROOT}';
          const ADMIN_KEY_STORAGE = 'apiproxy_admin_key_v1';
          const DEFAULT_CONFIG_YAML_TEMPLATE = \`targetHost: null
 debug:
-  max_ttl_seconds: 3600
   redact_headers:
     - authorization
     - proxy-authorization
@@ -2111,10 +2130,6 @@ debug:
     - set-cookie
     - x-proxy-key
     - x-admin-key
-  loggingEndpoint:
-    url: null
-    auth_header: null
-    auth_value: null
 transform:
   enabled: true
   defaultExpr: ""
@@ -2140,12 +2155,19 @@ header_forwarding:
 \`;
          let currentKey = '';
          let pendingLocalSaveApproval = false;
+         let pendingDeleteHeaderName = '';
+         let configValidateTimer = null;
 
          function el(id) { return document.getElementById(id); }
          function setOutput(id, data) {
            const node = el(id);
            if (!node) return;
            node.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+         }
+         function setHtml(id, html) {
+           const node = el(id);
+           if (!node) return;
+           node.innerHTML = String(html || '');
          }
          function showWarning(message) {
            const node = el('admin-warning');
@@ -2179,6 +2201,13 @@ header_forwarding:
              msg.style.display = text ? 'block' : 'none';
              msg.textContent = text;
            }
+         }
+         function setConfigSaveEnabled(enabled) {
+           const btn = el('config-save-btn');
+           if (!btn) return;
+           btn.disabled = !enabled;
+           btn.style.opacity = enabled ? '1' : '0.5';
+           btn.style.cursor = enabled ? 'pointer' : 'not-allowed';
          }
          function extractApiErrorText(payload, fallback) {
            if (payload && typeof payload === 'object' && payload.error && typeof payload.error === 'object') {
@@ -2235,8 +2264,7 @@ header_forwarding:
              updateSavedWarning();
              return;
            }
-           updateSavedWarning();
-           if (fromStorage) showWarning('Using key saved on this device. If this machine is shared, remove it.');
+            updateSavedWarning();
          }
          function clearSavedKey() {
            localStorage.removeItem(ADMIN_KEY_STORAGE);
@@ -2285,7 +2313,10 @@ header_forwarding:
                btn.style.borderColor = active ? '#111827' : '#cbd5e1';
                btn.style.fontWeight = active ? '700' : '500';
              });
-           }
+             if (name === 'debug') debugLoadTrace();
+             if (name === 'headers') headersList();
+             if (name === 'keys') keysRefresh();
+            }
            btns.forEach((btn) => {
              btn.style.padding = '8px 10px';
              btn.style.border = '1px solid #cbd5e1';
@@ -2300,75 +2331,66 @@ header_forwarding:
            });
            setActiveTab('overview');
          }
-         function formatOverviewStatus(version, debug, headers) {
+         function formatMs(ms) {
+           const n = Number(ms || 0);
+           if (!n) return 'n/a';
+           try { return new Date(n).toLocaleString(); } catch { return 'n/a'; }
+         }
+         function formatOverviewStatus(version, debug, headers, keys) {
            const versionText = version?.data?.version || 'unknown';
            const debugData = debug?.data || {};
            const debugEnabled = !!debugData.enabled;
            const ttlRemaining = Number(debugData.ttl_remaining_seconds || 0);
-           const maxTtl = Number(debugData.max_ttl_seconds || 0);
            const enrichedHeaders = Array.isArray(headers?.enriched_headers)
              ? headers.enriched_headers
              : (Array.isArray(headers?.data?.enriched_headers) ? headers.data.enriched_headers : []);
-           const lines = [
-             'Build Version',
-             '  - ' + versionText,
-             'Debug',
-             '  - enabled: ' + (debugEnabled ? 'yes' : 'no'),
-             '  - ttl_remaining_seconds: ' + ttlRemaining,
-             '  - max_ttl_seconds: ' + maxTtl,
-             'Enrichments',
-             '  - ' + (enrichedHeaders.length ? enrichedHeaders.join(', ') : '(none)'),
-           ];
-           return lines.join('\\n');
+           const proxy = keys?.data?.proxy || {};
+           const admin = keys?.data?.admin || {};
+           return '<div><b>Build Version:</b> ' + versionText + '</div>'
+             + '<div><b>Debug Enabled:</b> ' + (debugEnabled ? 'yes' : 'no') + '</div>'
+             + '<div><b>Debug TTL Remaining (seconds):</b> ' + ttlRemaining + '</div>'
+             + '<div><b>Enrichments:</b> ' + (enrichedHeaders.length ? enrichedHeaders.join(', ') : '(none)') + '</div>'
+             + '<div><b>Proxy Key:</b> primary=' + (proxy.primary_active ? 'active' : 'missing')
+             + ', secondary=' + (proxy.secondary_active ? 'active' : 'inactive')
+             + ', last rotated=' + formatMs(proxy.last_rotated_at_ms) + '</div>'
+             + '<div><b>Admin Key:</b> primary=' + (admin.primary_active ? 'active' : 'missing')
+             + ', last rotated=' + formatMs(admin.last_rotated_at_ms) + '</div>';
          }
          async function refreshOverview() {
            try {
-             const [version, debug, headers, configYaml] = await Promise.all([
+             const [version, debug, headers, keys] = await Promise.all([
                apiCall(ADMIN_ROOT + '/version', 'GET'),
                apiCall(ADMIN_ROOT + '/debug', 'GET'),
                apiCall(ADMIN_ROOT + '/headers', 'GET'),
-               apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true),
+               apiCall(ADMIN_ROOT + '/keys', 'GET'),
              ]);
-             setOutput('overview-config-output', configYaml);
-             setOutput('overview-output', formatOverviewStatus(version, debug, headers));
+             setHtml('overview-output', formatOverviewStatus(version, debug, headers, keys));
            } catch (e) {
-             setOutput('overview-config-output', '');
              setOutput('overview-output', String(e.message || e));
            }
          }
-         async function debugRefresh() {
-           try { setOutput('debug-output', await apiCall(ADMIN_ROOT + '/debug', 'GET')); }
-           catch (e) { setOutput('debug-output', String(e.message || e)); }
-         }
          async function debugEnable() {
-           const ttl = Number(el('ttl-seconds')?.value || 0);
-           try { setOutput('debug-output', await apiCall(ADMIN_ROOT + '/debug', 'PUT', { enabled: true, ttl_seconds: ttl })); }
+           try { setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug', 'PUT', { enabled: true })); }
            catch (e) { setOutput('debug-output', String(e.message || e)); }
          }
          async function debugDisable() {
-           try { setOutput('debug-output', await apiCall(ADMIN_ROOT + '/debug', 'DELETE')); }
+           try { setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug', 'DELETE')); }
            catch (e) { setOutput('debug-output', String(e.message || e)); }
          }
          async function debugLoadTrace() {
            try { setOutput('debug-output', await apiCall(ADMIN_ROOT + '/debug/last', 'GET', undefined, true)); }
            catch (e) { setOutput('debug-output', String(e.message || e)); }
          }
-         async function loggingSave() {
+         async function loggingSecretSave() {
            try {
-             const payload = {
-               loggingEndpoint: {
-                 url: el('logging-url')?.value?.trim() || null,
-                 auth_header: el('logging-auth-header')?.value?.trim() || null,
-                 auth_value: el('logging-auth-value')?.value || null,
-               },
-             };
-             setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug/loggingEndpoint', 'PUT', payload));
+             const payload = { value: el('logging-secret')?.value || '' };
+             setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug/loggingSecret', 'PUT', payload));
            } catch (e) {
              setOutput('logging-output', String(e.message || e));
            }
          }
-         async function loggingDelete() {
-           try { setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug/loggingEndpoint', 'DELETE')); }
+         async function loggingSecretDelete() {
+           try { setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug/loggingSecret', 'DELETE')); }
            catch (e) { setOutput('logging-output', String(e.message || e)); }
          }
          async function configLoad() {
@@ -2376,9 +2398,11 @@ header_forwarding:
              const text = await apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true);
              if (el('config-yaml')) el('config-yaml').value = text;
              setConfigValidationError('');
+             setConfigSaveEnabled(true);
              setOutput('config-output', 'Config reloaded from proxy.');
            } catch (e) {
               setOutput('config-output', String(e.message || e));
+              setConfigSaveEnabled(false);
            }
          }
          async function configValidate(showOutput) {
@@ -2403,15 +2427,18 @@ header_forwarding:
              if (!res.ok) {
                const errText = extractApiErrorText(payload, text || 'Config validation failed');
                setConfigValidationError(errText);
+               setConfigSaveEnabled(false);
                if (showOutput) setOutput('config-output', 'Validation failed\\n\\n' + errText);
                return false;
              }
              setConfigValidationError('');
+             setConfigSaveEnabled(true);
              if (showOutput) setOutput('config-output', formatConfigSummary('Validation successful', payload));
              return true;
            } catch (e) {
              const errText = String(e.message || e);
              setConfigValidationError(errText);
+             setConfigSaveEnabled(false);
              if (showOutput) setOutput('config-output', 'Validation failed\\n\\n' + errText);
              return false;
            }
@@ -2460,28 +2487,97 @@ header_forwarding:
            }
          }
          async function headersList() {
-           try { setOutput('headers-output', await apiCall(ADMIN_ROOT + '/headers', 'GET')); }
-           catch (e) { setOutput('headers-output', String(e.message || e)); }
+           try {
+             const payload = await apiCall(ADMIN_ROOT + '/headers', 'GET');
+             const names = Array.isArray(payload?.enriched_headers) ? payload.enriched_headers : [];
+             if (!names.length) {
+               setHtml('headers-list', '<div>(none)</div>');
+             } else {
+               const rows = names.map((name) =>
+                 '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #eee;">'
+                 + '<span>' + name + '</span>'
+                 + '<button type="button" class="delete-header-btn" data-name="' + name + '">Delete</button>'
+                 + '</div>'
+               );
+               setHtml('headers-list', rows.join(''));
+             }
+             setOutput('headers-output', 'Enrichments loaded.');
+           } catch (e) {
+             setOutput('headers-output', String(e.message || e));
+           }
          }
          async function headersSave() {
            const name = (el('header-name')?.value || '').trim();
            const value = el('header-value')?.value || '';
-           try { setOutput('headers-output', await apiCall(ADMIN_ROOT + '/headers/' + encodeURIComponent(name), 'PUT', { value })); }
+           try {
+             await apiCall(ADMIN_ROOT + '/headers/' + encodeURIComponent(name), 'PUT', { value });
+             if (el('header-name')) el('header-name').value = '';
+             if (el('header-value')) el('header-value').value = '';
+             setOutput('headers-output', 'Enrichment added.');
+             await headersList();
+           }
            catch (e) { setOutput('headers-output', String(e.message || e)); }
          }
-         async function headersDelete() {
-           const name = (el('header-name')?.value || '').trim();
-           try { setOutput('headers-output', await apiCall(ADMIN_ROOT + '/headers/' + encodeURIComponent(name), 'DELETE')); }
-           catch (e) { setOutput('headers-output', String(e.message || e)); }
+         async function headersDeleteConfirmed() {
+           const name = String(pendingDeleteHeaderName || '').trim();
+           if (!name) return;
+           try {
+             await apiCall(ADMIN_ROOT + '/headers/' + encodeURIComponent(name), 'DELETE');
+             setOutput('headers-output', 'Enrichment deleted: ' + name);
+             await headersList();
+           } catch (e) {
+             setOutput('headers-output', String(e.message || e));
+           } finally {
+             pendingDeleteHeaderName = '';
+             el('delete-header-modal')?.close();
+           }
+         }
+         function promptDeleteHeader(name) {
+           pendingDeleteHeaderName = String(name || '');
+           const text = el('delete-header-modal-text');
+           if (text) text.textContent = 'Delete enrichment "' + pendingDeleteHeaderName + '"?';
+           el('delete-header-modal')?.showModal();
+         }
+         function toggleHeaderValueVisibility() {
+           const field = el('header-value');
+           const btn = el('header-value-toggle-btn');
+           if (!field || !btn) return;
+           const hidden = field.type === 'password';
+           field.type = hidden ? 'text' : 'password';
+           btn.textContent = hidden ? 'Hide' : 'Show';
+         }
+         async function keysRefresh() {
+           try {
+             const payload = await apiCall(ADMIN_ROOT + '/keys', 'GET');
+             const proxy = payload?.data?.proxy || {};
+             const admin = payload?.data?.admin || {};
+             const html =
+               '<div><b>Proxy key</b></div>'
+               + '<div>Primary: ' + (proxy.primary_active ? 'active' : 'missing') + '</div>'
+               + '<div>Secondary overlap key: ' + (proxy.secondary_active ? 'active' : 'inactive') + '</div>'
+               + '<div>Secondary expiry: ' + formatMs(proxy.secondary_expires_at_ms) + '</div>'
+               + '<div>Last rotated: ' + formatMs(proxy.last_rotated_at_ms) + '</div>'
+               + '<hr style="margin:10px 0;border:none;border-top:1px solid #eee;" />'
+               + '<div><b>Admin key</b></div>'
+               + '<div>Primary: ' + (admin.primary_active ? 'active' : 'missing') + '</div>'
+               + '<div>Last rotated: ' + formatMs(admin.last_rotated_at_ms) + '</div>';
+             setHtml('keys-status', html);
+           } catch (e) {
+             setOutput('keys-output', String(e.message || e));
+           }
          }
          async function rotateProxy() {
-           try { setOutput('keys-output', await apiCall(ADMIN_ROOT + '/rotate', 'POST')); }
+           try {
+             setOutput('keys-output', await apiCall(ADMIN_ROOT + '/rotate', 'POST'));
+             await keysRefresh();
+           }
            catch (e) { setOutput('keys-output', String(e.message || e)); }
          }
          async function rotateAdmin() {
            try {
              const out = await apiCall(ADMIN_ROOT + '/rotate-admin', 'POST');
              setOutput('keys-output', out);
+             await keysRefresh();
              clearSavedKey();
              setCurrentKey('');
              showWarning('Admin key rotated. Re-enter the new admin key from response.');
@@ -2506,8 +2602,10 @@ header_forwarding:
              setCurrentKey(key);
              try {
                await refreshOverview();
-               await debugRefresh();
+               await debugLoadTrace();
                await configLoad();
+               await headersList();
+               await keysRefresh();
              } catch {
                // no-op
              }
@@ -2554,12 +2652,14 @@ header_forwarding:
              showWarning('Saved key removed.');
            });
            el('overview-refresh-btn')?.addEventListener('click', refreshOverview);
-           el('debug-refresh-btn')?.addEventListener('click', debugRefresh);
+           el('debug-refresh-trace-link')?.addEventListener('click', (evt) => {
+             evt.preventDefault();
+             debugLoadTrace();
+           });
            el('debug-enable-btn')?.addEventListener('click', debugEnable);
            el('debug-disable-btn')?.addEventListener('click', debugDisable);
-           el('debug-load-trace-btn')?.addEventListener('click', debugLoadTrace);
-           el('logging-save-btn')?.addEventListener('click', loggingSave);
-           el('logging-delete-btn')?.addEventListener('click', loggingDelete);
+           el('logging-secret-save-btn')?.addEventListener('click', loggingSecretSave);
+           el('logging-secret-delete-btn')?.addEventListener('click', loggingSecretDelete);
            el('config-reload-link')?.addEventListener('click', (evt) => {
              evt.preventDefault();
              configLoad();
@@ -2569,10 +2669,26 @@ header_forwarding:
              configTestRule();
            });
            el('config-save-btn')?.addEventListener('click', configSave);
-           el('config-yaml')?.addEventListener('blur', () => configValidate(false));
-           el('headers-list-btn')?.addEventListener('click', headersList);
+           el('config-yaml')?.addEventListener('input', () => {
+             setConfigSaveEnabled(false);
+             if (configValidateTimer) clearTimeout(configValidateTimer);
+             configValidateTimer = setTimeout(() => { configValidate(false); }, 350);
+           });
+           el('config-yaml')?.addEventListener('blur', () => configValidate(true));
            el('headers-save-btn')?.addEventListener('click', headersSave);
-           el('headers-delete-btn')?.addEventListener('click', headersDelete);
+           el('header-value-toggle-btn')?.addEventListener('click', toggleHeaderValueVisibility);
+           el('headers-list')?.addEventListener('click', (evt) => {
+             const target = evt.target;
+             if (!target || !target.classList?.contains('delete-header-btn')) return;
+             const name = target.getAttribute('data-name') || '';
+             promptDeleteHeader(name);
+           });
+           el('delete-header-cancel-btn')?.addEventListener('click', () => {
+             pendingDeleteHeaderName = '';
+             el('delete-header-modal')?.close();
+           });
+           el('delete-header-confirm-btn')?.addEventListener('click', headersDeleteConfirmed);
+           el('keys-refresh-btn')?.addEventListener('click', keysRefresh);
            el('rotate-proxy-btn')?.addEventListener('click', rotateProxy);
            el('rotate-admin-btn')?.addEventListener('click', rotateAdmin);
            if (el('config-yaml') && !el('config-yaml').value.trim()) {
@@ -2586,8 +2702,10 @@ header_forwarding:
              if (el('admin-key')) el('admin-key').value = saved;
              setCurrentKey(saved, true);
              refreshOverview();
-             debugRefresh();
+             debugLoadTrace();
              configLoad();
+             headersList();
+             keysRefresh();
            }
          }
          bind();
@@ -2750,11 +2868,17 @@ async function handleInitPage(env, request) {
 
   if (!existingProxy) {
     createdProxy = generateSecret();
-    await env.CONFIG.put(KV_PROXY_KEY, createdProxy);
+    await Promise.all([
+      env.CONFIG.put(KV_PROXY_KEY, createdProxy),
+      env.CONFIG.put(KV_PROXY_KEY_ROTATED_AT, String(Date.now())),
+    ]);
   }
   if (!existingAdmin) {
     createdAdmin = generateSecret();
-    await env.CONFIG.put(KV_ADMIN_KEY, createdAdmin);
+    await Promise.all([
+      env.CONFIG.put(KV_ADMIN_KEY, createdAdmin),
+      env.CONFIG.put(KV_ADMIN_KEY_ROTATED_AT, String(Date.now())),
+    ]);
   }
 
   if (!createdProxy && !createdAdmin) {
@@ -2879,11 +3003,13 @@ async function handleRotate(request, env) {
     await Promise.all([
       env.CONFIG.put(KV_PROXY_KEY_OLD, current),
       env.CONFIG.put(KV_PROXY_KEY_OLD_EXPIRES_AT, String(oldExpiresAt)),
+      env.CONFIG.put(KV_PROXY_KEY_ROTATED_AT, String(Date.now())),
     ]);
   } else {
     await Promise.all([
       env.CONFIG.delete(KV_PROXY_KEY_OLD),
       env.CONFIG.delete(KV_PROXY_KEY_OLD_EXPIRES_AT),
+      env.CONFIG.put(KV_PROXY_KEY_ROTATED_AT, String(Date.now())),
     ]);
   }
 
@@ -2914,7 +3040,10 @@ async function handleRotate(request, env) {
 
 async function handleRotateAdmin(request, env) {
   const newAdminKey = generateSecret();
-  await env.CONFIG.put(KV_ADMIN_KEY, newAdminKey);
+  await Promise.all([
+    env.CONFIG.put(KV_ADMIN_KEY, newAdminKey),
+    env.CONFIG.put(KV_ADMIN_KEY_ROTATED_AT, String(Date.now())),
+  ]);
 
   const acceptsHtml = (request.headers.get("accept") || "").includes("text/html");
   if (acceptsHtml) {
@@ -3299,6 +3428,7 @@ async function handleRequestCore(request, env, payload, ctx) {
 }
 
 function htmlPage(title, bodyHtml) {
+  const heading = title ? `<h2>${escapeHtml(title)}</h2>` : "";
   return `<!doctype html>
 <html>
 <head>
@@ -3313,7 +3443,7 @@ function htmlPage(title, bodyHtml) {
   </style>
 </head>
 <body>
-  <h2>${escapeHtml(title)}</h2>
+  ${heading}
   ${bodyHtml}
 </body>
 </html>`;
