@@ -40,7 +40,7 @@ Customer-self-hosted Worker that relays upstream API calls and optionally applie
 - Proxy key: `POST /_apiproxy/admin/rotate`
 - Admin key: `POST /_apiproxy/admin/rotate-admin`
 
-For curl-based API verification, use the **Smoke test sequence** section below.
+For curl-based API verification, use the **Testing out your proxy** section below.
 
 ## Key management
 
@@ -254,7 +254,19 @@ curl -sS "$WORKER_URL/_apiproxy/request" \
   - `targetHost` set: header is rejected (`HOST_OVERRIDE_NOT_ALLOWED`).
   - `targetHost` unset/null: header is required (`MISSING_UPSTREAM_HOST`).
 
-## Smoke test sequence
+## Testing out your proxy
+
+Quick request test:
+
+```bash
+curl -sS "$WORKER_URL/_apiproxy/request" \
+  -H "Content-Type: application/json" \
+  -H "X-Proxy-Key: $PROXY_KEY" \
+  -H "X-Proxy-Host: https://httpbin.org" \
+  --data '{"upstream":{"method":"GET","url":"/json"}}'
+```
+
+Full smoke test sequence:
 
 Set variables:
 

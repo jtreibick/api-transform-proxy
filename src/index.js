@@ -23,6 +23,7 @@ const KV_CONFIG_JSON = "config_json_v1";
 const KV_ENRICHED_HEADER_PREFIX = "enriched_header:";
 const RESERVED_ROOT = "/_apiproxy";
 const ADMIN_ROOT = `${RESERVED_ROOT}/admin`;
+const DEFAULT_DOCS_URL = "https://github.com/jtreibick/api-transform-proxy/blob/main/README.md";
 
 const DEFAULTS = {
   ALLOWED_HOSTS: "",
@@ -1311,6 +1312,8 @@ async function handleStatusPage(env) {
   const [proxyKey, adminKey] = await Promise.all([env.CONFIG.get(KV_PROXY_KEY), env.CONFIG.get(KV_ADMIN_KEY)]);
   const proxyInitialized = !!proxyKey;
   const adminInitialized = !!adminKey;
+  const testingDocsUrl = getDocsSectionUrl(env, "testing-out-your-proxy");
+  const keyManagementDocsUrl = getDocsSectionUrl(env, "key-management");
 
   return new Response(
     htmlPage(
@@ -1321,7 +1324,8 @@ async function handleStatusPage(env) {
          proxyInitialized && adminInitialized
            ? `Next step: call <code>POST ${RESERVED_ROOT}/request</code> with header <code>X-Proxy-Key</code>.`
            : `Visit <a href="${RESERVED_ROOT}/init">${RESERVED_ROOT}/init</a> to bootstrap missing keys.`
-       }</p>`
+       }</p>
+       <p><a href="${escapeHtml(testingDocsUrl)}" target="_blank" rel="noopener noreferrer">Testing out your proxy</a> | <a href="${escapeHtml(keyManagementDocsUrl)}" target="_blank" rel="noopener noreferrer">Rotating keys</a></p>`
     ),
     { headers: { "content-type": "text/html; charset=utf-8" } }
   );
@@ -1563,10 +1567,13 @@ async function handleInitPage(env, request) {
   }
 
   if (!createdProxy && !createdAdmin) {
+    const keyManagementDocsUrl = getDocsSectionUrl(env, "key-management");
     return new Response(
       htmlPage(
         "Proxy already initialized. Keys are shown once.",
-        `<p>If you administer this proxy, see deployment docs 'key management' section for how to recover.</p>`
+        `<p>If you administer this proxy, see <a href="${escapeHtml(
+          keyManagementDocsUrl
+        )}" target="_blank" rel="noopener noreferrer">deployment docs 'key management' section</a> for how to recover.</p>`
       ),
       { headers: { "content-type": "text/html; charset=utf-8" } }
     );
@@ -1651,6 +1658,12 @@ function renderRequestCurlExample(origin) {
     <h3>Test with curl</h3>
     <pre style="padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(cmd)}</pre>
   `;
+}
+
+function getDocsSectionUrl(env, sectionAnchor) {
+  const raw = String(env?.DOCS_URL || DEFAULT_DOCS_URL || "").trim();
+  const base = raw ? raw.replace(/#.*$/, "") : DEFAULT_DOCS_URL;
+  return `${base}#${sectionAnchor}`;
 }
 
 async function handleRotate(request, env) {
