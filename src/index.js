@@ -120,11 +120,11 @@ const DEFAULT_CONFIG_V1 = {
 let jsonataFactory = null;
 let yamlApi = null;
 
-const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#0f172a"/>
-  <path d="M22 13L10 22v20l12 9" fill="none" stroke="#e2e8f0" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M42 13l12 9v20l-12 9" fill="none" stroke="#e2e8f0" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M35 8L23 32h8l-3 24 14-28h-8z" fill="#22d3ee"/>
+const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72">
+  <rect width="72" height="72" rx="16" fill="#0f172a"/>
+  <path d="M24 15L11 24v24l13 9" fill="none" stroke="#e2e8f0" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M48 15l13 9v24l-13 9" fill="none" stroke="#e2e8f0" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M39 9L25 36h8l-3 27 16-31h-9z" fill="#22d3ee"/>
 </svg>`;
 
 const FAVICON_DATA_URL = `data:image/svg+xml,${encodeURIComponent(FAVICON_SVG)}`;
@@ -135,7 +135,13 @@ export default {
     const normalizedPath = normalizePathname(pathname);
 
     try {
-      if ((normalizedPath === "/" || normalizedPath === RESERVED_ROOT) && request.method === "GET") {
+      if (normalizedPath === "/" && request.method === "GET") {
+        if (request.headers.get("X-Proxy-Key")) {
+          return await handleRootProxyRequest(request, env);
+        }
+        return Response.redirect(new URL(`${RESERVED_ROOT}/`, request.url).toString(), 302);
+      }
+      if (normalizedPath === RESERVED_ROOT && request.method === "GET") {
         return await handleStatusPage(env);
       }
       if (normalizedPath === `${RESERVED_ROOT}/init` && request.method === "GET") {
@@ -1320,12 +1326,8 @@ async function handleStatusPage(env) {
       "API Transform Proxy",
       `<p><b>Proxy key initialized:</b> ${proxyInitialized ? "yes" : "no"}</p>
        <p><b>Admin key initialized:</b> ${adminInitialized ? "yes" : "no"}</p>
-       <p>${
-         proxyInitialized && adminInitialized
-           ? `Next step: call <code>POST ${RESERVED_ROOT}/request</code> with header <code>X-Proxy-Key</code>.`
-           : `Visit <a href="${RESERVED_ROOT}/init">${RESERVED_ROOT}/init</a> to bootstrap missing keys.`
-       }</p>
-       <p><a href="${escapeHtml(testingDocsUrl)}" target="_blank" rel="noopener noreferrer">Testing out your proxy</a> | <a href="${escapeHtml(keyManagementDocsUrl)}" target="_blank" rel="noopener noreferrer">Rotating keys</a></p>`
+       <p><b>Next steps:</b><br />
+       <a href="${escapeHtml(testingDocsUrl)}" target="_blank" rel="noopener noreferrer">Testing out your proxy</a> | <a href="${escapeHtml(keyManagementDocsUrl)}" target="_blank" rel="noopener noreferrer">Rotating keys</a></p>`
     ),
     { headers: { "content-type": "text/html; charset=utf-8" } }
   );
@@ -1567,13 +1569,17 @@ async function handleInitPage(env, request) {
   }
 
   if (!createdProxy && !createdAdmin) {
+    const testingDocsUrl = getDocsSectionUrl(env, "testing-out-your-proxy");
     const keyManagementDocsUrl = getDocsSectionUrl(env, "key-management");
     return new Response(
       htmlPage(
-        "Proxy already initialized. Keys are shown once.",
-        `<p>If you administer this proxy, see <a href="${escapeHtml(
-          keyManagementDocsUrl
-        )}" target="_blank" rel="noopener noreferrer">deployment docs 'key management' section</a> for how to recover.</p>`
+        "Proxy already initialized. Keys are only shown once.",
+        `<p>Instructions to create new keys:</p>
+         <p><a href="${escapeHtml(
+           keyManagementDocsUrl
+         )}" target="_blank" rel="noopener noreferrer">Rotating Keys</a></p>
+         <p>Other Instructions</p>
+         <p><a href="${escapeHtml(testingDocsUrl)}" target="_blank" rel="noopener noreferrer">Testing out your proxy</a></p>`
       ),
       { headers: { "content-type": "text/html; charset=utf-8" } }
     );
@@ -1734,18 +1740,23 @@ async function handleRotateAdmin(request, env) {
   });
 }
 
+async function handleRootProxyRequest(request, env) {
+  await requireProxyKey(request, env);
+  const search = new URL(request.url).search || "";
+  const payload = {
+    upstream: {
+      method: "GET",
+      url: `/${search}`,
+    },
+  };
+  return handleRequestCore(request, env, payload);
+}
+
 async function handleRequest(request, env) {
   await requireProxyKey(request, env);
   enforceInvokeContentType(request);
 
   const maxReq = getEnvInt(env, "MAX_REQ_BYTES", DEFAULTS.MAX_REQ_BYTES);
-  const maxResp = getEnvInt(env, "MAX_RESP_BYTES", DEFAULTS.MAX_RESP_BYTES);
-  const maxExpr = getEnvInt(env, "MAX_EXPR_BYTES", DEFAULTS.MAX_EXPR_BYTES);
-  const transformTimeoutMs = getEnvInt(env, "TRANSFORM_TIMEOUT_MS", DEFAULTS.TRANSFORM_TIMEOUT_MS);
-
-  const config = await loadConfigV1(env);
-  const proxyHost = resolveProxyHostForRequest(request, config);
-  const headerForwardingPolicy = getHeaderForwardingPolicy(config);
   const payload = await readJsonWithLimit(request, maxReq);
   const problems = validateInvokePayload(payload, { allowMissingUrl: true });
   if (problems.length > 0) {
@@ -1755,6 +1766,17 @@ async function handleRequest(request, env) {
       received: truncateJsonSnippet(payload),
     });
   }
+  return handleRequestCore(request, env, payload);
+}
+
+async function handleRequestCore(request, env, payload) {
+  const maxResp = getEnvInt(env, "MAX_RESP_BYTES", DEFAULTS.MAX_RESP_BYTES);
+  const maxExpr = getEnvInt(env, "MAX_EXPR_BYTES", DEFAULTS.MAX_EXPR_BYTES);
+  const transformTimeoutMs = getEnvInt(env, "TRANSFORM_TIMEOUT_MS", DEFAULTS.TRANSFORM_TIMEOUT_MS);
+
+  const config = await loadConfigV1(env);
+  const proxyHost = resolveProxyHostForRequest(request, config);
+  const headerForwardingPolicy = getHeaderForwardingPolicy(config);
 
   let upstreamUrl;
   try {
@@ -1959,6 +1981,7 @@ function htmlPage(title, bodyHtml) {
   <link rel="icon" type="image/svg+xml" href="${FAVICON_DATA_URL}" />
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 32px; max-width: 820px; }
+    p { font-size: 16px; }
     code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
   </style>
 </head>

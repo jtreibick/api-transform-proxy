@@ -14,7 +14,7 @@ Customer-self-hosted Worker that relays upstream API calls and optionally applie
 
 2. Open the Worker status page in your browser:
 - `https://your-worker.workers.dev/_apiproxy`
-- `https://your-worker.workers.dev/` also works.
+- `https://your-worker.workers.dev/` redirects to `/_apiproxy/` (unless `X-Proxy-Key` is sent).
 
 3. Bootstrap keys in your browser (first run only):
 - `https://your-worker.workers.dev/_apiproxy/init`
@@ -136,6 +136,9 @@ binding = "CONFIG"
   - Status page only.
   - Never creates or rotates keys.
   - Shows initialized state and next step.
+- `GET /`
+  - If `X-Proxy-Key` is absent: redirects (`302`) to `/_apiproxy/`.
+  - If `X-Proxy-Key` is present: executes a proxied `GET` to upstream root path (`/`) using the same host resolution, allowlist, header forwarding, and transform pipeline as `POST /_apiproxy/request`.
 - `GET /_apiproxy/admin/version`
   - Returns the deployed build version as JSON.
   - Requires header `X-Admin-Key`.
