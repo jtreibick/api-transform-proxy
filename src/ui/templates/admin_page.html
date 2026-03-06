@@ -181,36 +181,39 @@
          </div>
          <div id="tab-sandbox" class="tab-panel" style="display:none;">
            <p><b>API Sandbox</b></p>
-           <div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;">
-             <div style="min-width:220px;max-width:260px;border:1px solid #e2e8f0;border-radius:8px;padding:10px;">
-               <div style="font-weight:700;margin-bottom:8px;">Endpoints</div>
-               <div id="sandbox-endpoints"></div>
+           <div style="flex:1;min-width:340px;">
+             <label style="display:block;margin:4px 0 6px;">Endpoint</label>
+             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+               <select id="sandbox-verb" style="min-width:120px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;"></select>
+               <code>/_apiproxy/</code>
+               <select id="sandbox-path" style="min-width:260px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;"></select>
              </div>
-             <div style="flex:1;min-width:340px;">
-               <label for="sandbox-auth-mode" style="display:block;margin:4px 0;">Built-in Auth Header</label>
-               <select id="sandbox-auth-mode" style="width:100%;max-width:360px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;">
-                 <option value="none">none</option>
-                 <option value="admin_token">Authorization: Bearer (current admin token)</option>
-                 <option value="admin_key">X-Admin-Key</option>
-                 <option value="proxy_key">X-Proxy-Key</option>
-                 <option value="issuer_key">X-Issuer-Key</option>
-               </select>
-               <label for="sandbox-auth-value" style="display:block;margin:8px 0 4px;">Auth Header Value (when required)</label>
-               <input id="sandbox-auth-value" type="password" placeholder="header value"
-                 style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
-               <label for="sandbox-extra-headers" style="display:block;margin:8px 0 4px;">Extra Headers (JSON object)</label>
-               <textarea id="sandbox-extra-headers" rows="4"
-                 style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">{}</textarea>
-               <label for="sandbox-body" style="display:block;margin:8px 0 4px;">Body (JSON)</label>
-               <textarea id="sandbox-body" rows="10"
-                 style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">{}</textarea>
-               <div style="margin-top:10px;">
-                 <button type="button" id="sandbox-send-btn">Send</button>
-               </div>
+             <label for="sandbox-url" style="display:block;margin:8px 0 4px;">Full Request URL (editable)</label>
+             <input id="sandbox-url" type="text"
+               style="width:100%;max-width:760px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+             <label for="sandbox-auth-mode" style="display:block;margin:10px 0 4px;">Built-in Auth Header</label>
+             <select id="sandbox-auth-mode" style="width:100%;max-width:360px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;">
+               <option value="none">none</option>
+               <option value="admin_token">Authorization: Bearer (current admin token)</option>
+               <option value="admin_key">X-Admin-Key</option>
+               <option value="proxy_key">X-Proxy-Key</option>
+               <option value="issuer_key">X-Issuer-Key</option>
+             </select>
+             <label for="sandbox-auth-value" style="display:block;margin:8px 0 4px;">Auth Header Value (when required)</label>
+             <input id="sandbox-auth-value" type="password" placeholder="header value"
+               style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+             <label for="sandbox-extra-headers" style="display:block;margin:8px 0 4px;">Headers (JSON object)</label>
+             <textarea id="sandbox-extra-headers" rows="4"
+               style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">{}</textarea>
+             <label for="sandbox-body" style="display:block;margin:8px 0 4px;">Body (JSON or raw text)</label>
+             <textarea id="sandbox-body" rows="10"
+               style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">{}</textarea>
+             <div style="margin-top:10px;">
+               <button type="button" id="sandbox-send-btn">Send</button>
              </div>
            </div>
-           <p style="margin-top:10px;"><b>Formed request</b></p>
-           <pre id="sandbox-request" style="margin-top:6px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Request preview appears here.</pre>
+           <p style="margin-top:10px;"><b>Formed request (curl, redacted)</b></p>
+           <pre id="sandbox-request" style="margin-top:6px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">curl preview appears here.</pre>
            <p style="margin-top:10px;"><b>Response</b></p>
            <pre id="sandbox-response" style="margin-top:6px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Response appears here.</pre>
          </div>

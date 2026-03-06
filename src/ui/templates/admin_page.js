@@ -4,9 +4,9 @@
          let pendingDeleteHeaderName = '';
          let configValidateTimer = null;
          let sandboxTemplateKey = '';
+         let sandboxSyncingControls = false;
          const SANDBOX_TEMPLATES = {
            status_page: { label: 'GET /_apiproxy', method: 'GET', path: '/_apiproxy', auth_mode: 'none', headers: {}, body: null },
-           status_root: { label: 'GET /', method: 'GET', path: '/', auth_mode: 'none', headers: {}, body: null },
            request_passthrough: {
              label: 'POST /_apiproxy/request',
              method: 'POST',
@@ -60,6 +60,16 @@
            admin_headers_delete: { label: 'DELETE /_apiproxy/admin/headers/authorization', method: 'DELETE', path: '/_apiproxy/admin/headers/authorization', auth_mode: 'admin_token', headers: {}, body: null },
            admin_outbound_get: { label: 'GET /_apiproxy/admin/key-rotation-config', method: 'GET', path: '/_apiproxy/admin/key-rotation-config', auth_mode: 'admin_token', headers: {}, body: null },
          };
+         const SANDBOX_API_PREFIX = '/_apiproxy';
+         const SANDBOX_REDACT_HEADERS = new Set([
+           'authorization',
+           'proxy-authorization',
+           'cookie',
+           'set-cookie',
+           'x-proxy-key',
+           'x-admin-key',
+           'x-issuer-key',
+         ]);
 
          function el(id) { return document.getElementById(id); }
          function setOutput(id, data) {
@@ -532,20 +542,90 @@
              setOutput('keys-output', String(e.message || e));
            }
          }
-         function sandboxRenderEndpointList() {
-           const node = el('sandbox-endpoints');
-           if (!node) return;
-           const rows = Object.entries(SANDBOX_TEMPLATES).map(([key, t]) =>
-             '<button type="button" class="sandbox-endpoint-btn" data-key="' + key + '"'
-             + ' style="display:block;width:100%;text-align:left;padding:8px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;cursor:pointer;margin-bottom:6px;">'
-             + t.label + '</button>'
-           );
-           node.innerHTML = rows.join('');
+         function sandboxPathToSuffix(path) {
+           if (path === SANDBOX_API_PREFIX) return '';
+           if (path.startsWith(SANDBOX_API_PREFIX + '/')) return path.slice((SANDBOX_API_PREFIX + '/').length);
+           return null;
+         }
+         function sandboxBuildUrlFromSelection() {
+           const suffix = el('sandbox-path')?.value || '';
+           const base = window.location.origin || '';
+           return base + SANDBOX_API_PREFIX + (suffix ? '/' + suffix : '');
+         }
+         function sandboxSyncUrlFromSelection() {
+           if (sandboxSyncingControls) return;
+           const node = el('sandbox-url');
+           if (node) node.value = sandboxBuildUrlFromSelection();
+         }
+         function sandboxFindTemplate(method, suffix) {
+           const m = String(method || '').toUpperCase();
+           const s = String(suffix || '');
+           const entries = Object.entries(SANDBOX_TEMPLATES);
+           for (const [key, tpl] of entries) {
+             const tplSuffix = sandboxPathToSuffix(String(tpl.path || ''));
+             if (tplSuffix === null) continue;
+             if (String(tpl.method || '').toUpperCase() === m && tplSuffix === s) {
+               return { key, tpl };
+             }
+           }
+           return null;
+         }
+         function sandboxRedactHeader(name, value) {
+           const n = String(name || '').toLowerCase();
+           if (SANDBOX_REDACT_HEADERS.has(n)) return '<REDACTED>';
+           if (n.includes('token') || n.includes('secret') || n.includes('key')) return '<REDACTED>';
+           return String(value ?? '');
+         }
+         function shellQuote(value) {
+           return "'" + String(value ?? '').replace(/'/g, "'\\''") + "'";
+         }
+         function sandboxBuildCurl(method, url, headers, bodyText) {
+           const lines = [];
+           lines.push('curl -sS -X ' + String(method || 'GET').toUpperCase() + ' ' + shellQuote(url));
+           Object.entries(headers || {}).forEach(([name, value]) => {
+             lines.push('  -H ' + shellQuote(name + ': ' + sandboxRedactHeader(name, value)) + ' \\');
+           });
+           const includeBody = method !== 'GET' && method !== 'HEAD' && String(bodyText || '').length > 0;
+           if (includeBody) {
+             lines.push('  --data-binary ' + shellQuote(String(bodyText)));
+           } else if (lines.length > 1) {
+             const last = lines[lines.length - 1];
+             if (last.endsWith(' \\')) lines[lines.length - 1] = last.slice(0, -2);
+           }
+           return lines.join('\n');
+         }
+         function sandboxRenderSelectors() {
+           const verbNode = el('sandbox-verb');
+           const pathNode = el('sandbox-path');
+           if (!verbNode || !pathNode) return;
+           const verbs = Array.from(new Set(
+             Object.values(SANDBOX_TEMPLATES)
+               .map((t) => String(t.method || '').toUpperCase())
+               .filter(Boolean)
+           )).sort();
+           const paths = Array.from(new Set(
+             Object.values(SANDBOX_TEMPLATES)
+               .map((t) => sandboxPathToSuffix(String(t.path || '')))
+               .filter((v) => v !== null)
+           )).sort((a, b) => a.localeCompare(b));
+           verbNode.innerHTML = verbs.map((v) => '<option value="' + v + '">' + v + '</option>').join('');
+           pathNode.innerHTML = paths.map((p) => {
+             const label = p || '(root)';
+             return '<option value="' + p + '">' + label + '</option>';
+           }).join('');
          }
          function sandboxApplyTemplate(key) {
            const tpl = SANDBOX_TEMPLATES[key];
            if (!tpl) return;
            sandboxTemplateKey = key;
+           const suffix = sandboxPathToSuffix(String(tpl.path || ''));
+           if (suffix !== null) {
+             sandboxSyncingControls = true;
+             if (el('sandbox-verb')) el('sandbox-verb').value = String(tpl.method || 'GET').toUpperCase();
+             if (el('sandbox-path')) el('sandbox-path').value = suffix;
+             sandboxSyncingControls = false;
+             sandboxSyncUrlFromSelection();
+           }
            if (el('sandbox-auth-mode')) el('sandbox-auth-mode').value = tpl.auth_mode || 'none';
            if (el('sandbox-extra-headers')) el('sandbox-extra-headers').value = JSON.stringify(tpl.headers || {}, null, 2);
            if (el('sandbox-body')) {
@@ -559,6 +639,17 @@
            }
            setOutput('sandbox-request', 'Template selected: ' + tpl.label);
          }
+         function sandboxApplyTemplateForSelection() {
+           const method = el('sandbox-verb')?.value || 'GET';
+           const suffix = el('sandbox-path')?.value || '';
+           const match = sandboxFindTemplate(method, suffix);
+           if (match) {
+             sandboxApplyTemplate(match.key);
+             return;
+           }
+           sandboxTemplateKey = '';
+           sandboxSyncUrlFromSelection();
+         }
          function sandboxBuildAuthHeader(mode, value) {
            const v = String(value || '');
            if (mode === 'admin_token') return currentKey ? { Authorization: 'Bearer ' + currentKey } : {};
@@ -569,9 +660,14 @@
          }
          async function sandboxSend() {
            try {
-             const tpl = SANDBOX_TEMPLATES[sandboxTemplateKey] || SANDBOX_TEMPLATES.request_passthrough;
+             const method = String(el('sandbox-verb')?.value || 'GET').toUpperCase();
+             const suffix = String(el('sandbox-path')?.value || '');
+             const tplMatch = sandboxFindTemplate(method, suffix);
+             const tpl = tplMatch ? tplMatch.tpl : null;
              const authMode = el('sandbox-auth-mode')?.value || 'none';
              const authValue = el('sandbox-auth-value')?.value || '';
+             const url = String(el('sandbox-url')?.value || sandboxBuildUrlFromSelection()).trim();
+             if (!url) throw new Error('Request URL is required.');
              let extraHeaders = {};
              try {
                extraHeaders = JSON.parse(el('sandbox-extra-headers')?.value || '{}');
@@ -581,24 +677,19 @@
              if (!extraHeaders || typeof extraHeaders !== 'object' || Array.isArray(extraHeaders)) {
                throw new Error('Extra headers must be a JSON object.');
              }
-             const templateHeaders = (tpl.headers && typeof tpl.headers === 'object' && !Array.isArray(tpl.headers)) ? tpl.headers : {};
+             const templateHeaders = (tpl && tpl.headers && typeof tpl.headers === 'object' && !Array.isArray(tpl.headers)) ? tpl.headers : {};
              const headers = { ...templateHeaders, ...extraHeaders, ...sandboxBuildAuthHeader(authMode, authValue) };
              let bodyText = el('sandbox-body')?.value ?? '';
-             const formed = {
-               method: tpl.method,
-               path: tpl.path,
-               headers,
-               body: bodyText || null,
-             };
-             setOutput('sandbox-request', formed);
+             const curlText = sandboxBuildCurl(method, url, headers, bodyText);
+             setOutput('sandbox-request', curlText);
              const init = {
-               method: tpl.method,
+               method,
                headers: { ...headers },
              };
-             if (tpl.method !== 'GET' && tpl.method !== 'HEAD') {
+             if (method !== 'GET' && method !== 'HEAD') {
                init.body = bodyText || '';
              }
-             const res = await fetch(tpl.path, init);
+             const res = await fetch(url, init);
              const text = await res.text();
              let parsed = null;
              try { parsed = JSON.parse(text); } catch {}
@@ -612,11 +703,10 @@
            }
          }
          function sandboxInit() {
-           if (!el('sandbox-endpoints')) return;
-           if (!sandboxTemplateKey) {
-             sandboxRenderEndpointList();
-             sandboxApplyTemplate('request_passthrough');
-           }
+           if (!el('sandbox-verb') || !el('sandbox-path')) return;
+           sandboxRenderSelectors();
+           if (!sandboxTemplateKey) sandboxApplyTemplate('request_passthrough');
+           sandboxSyncUrlFromSelection();
          }
          async function headersList() {
            try {
@@ -853,12 +943,8 @@
            el('rotate-proxy-btn')?.addEventListener('click', rotateProxy);
            el('rotate-issuer-btn')?.addEventListener('click', rotateIssuer);
            el('rotate-admin-btn')?.addEventListener('click', rotateAdmin);
-           el('sandbox-endpoints')?.addEventListener('click', (evt) => {
-             const target = evt.target?.closest ? evt.target.closest('.sandbox-endpoint-btn') : null;
-             if (!target) return;
-             const key = target.getAttribute('data-key') || '';
-             sandboxApplyTemplate(key);
-           });
+           el('sandbox-verb')?.addEventListener('change', sandboxApplyTemplateForSelection);
+           el('sandbox-path')?.addEventListener('change', sandboxApplyTemplateForSelection);
            el('sandbox-send-btn')?.addEventListener('click', sandboxSend);
            try {
              const token = sessionStorage.getItem(ADMIN_ACCESS_TOKEN_STORAGE) || '';
