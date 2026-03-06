@@ -16,10 +16,13 @@
          <div style="display:flex;gap:14px;align-items:flex-start;margin:14px 0;">
          <div id="admin-nav" style="display:flex;flex-direction:column;gap:8px;min-width:220px;">
            <button type="button" class="tab-btn" data-tab="overview">Status</button>
-           <button type="button" class="tab-btn" data-tab="headers">Enrichments</button>
            <button type="button" class="tab-btn" data-tab="debug">Logging</button>
-           <button type="button" class="tab-btn" data-tab="outbound-auth">Outbound Auth</button>
-           <button type="button" class="tab-btn" data-tab="inbound-auth">Inbound Auth</button>
+           <div style="margin-top:6px;font-size:12px;color:#64748b;font-weight:700;text-transform:uppercase;">Outbound</div>
+           <button type="button" class="tab-btn tab-child" data-tab="outbound-auth">Outbound Auth</button>
+           <button type="button" class="tab-btn tab-child" data-tab="outbound-transform">Outbound Transformations</button>
+           <div style="margin-top:6px;font-size:12px;color:#64748b;font-weight:700;text-transform:uppercase;">Inbound</div>
+           <button type="button" class="tab-btn tab-child" data-tab="inbound-auth">Inbound Auth</button>
+           <button type="button" class="tab-btn tab-child" data-tab="inbound-transform">Inbound Transformations</button>
            <button type="button" class="tab-btn" data-tab="sandbox">API Sandbox</button>
            <button type="button" class="tab-btn" data-tab="config">Config</button>
          </div>
@@ -74,6 +77,11 @@
          </div>
          <div id="tab-outbound-auth" class="tab-panel" style="display:none;">
            <p><b>Outbound Auth</b></p>
+           <label style="display:flex;gap:8px;align-items:center;margin:8px 0 10px;">
+             <input id="outbound-auth-enabled" type="checkbox" />
+             <span>Enabled</span>
+           </label>
+           <div id="outbound-auth-fields">
            <label for="outbound-mode" style="display:block;margin:8px 0 4px;">Auth mode</label>
            <select id="outbound-mode" style="width:100%;max-width:420px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;">
              <option value="autorotation">Auto-rotation</option>
@@ -129,17 +137,33 @@
            <label for="kr-retry-on-401" style="display:block;margin:10px 0 4px;">Retry Once On 401</label>
            <input id="kr-retry-on-401" type="checkbox" />
            </div>
-
-           <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap;">
-             <button type="button" id="kr-save-btn">Save</button>
-             <button type="button" id="kr-reload-btn">Reload</button>
            </div>
            <div style="margin-top:10px;">
-             <button type="button" id="kr-save-btn-bottom">Save</button>
+             <button type="button" id="kr-save-btn-bottom">Store Secret</button>
            </div>
            <pre id="kr-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Key rotation output appears here.</pre>
          </div>
-         <div id="tab-headers" class="tab-panel" style="display:none;">
+         <div id="tab-outbound-transform" class="tab-panel" style="display:none;">
+           <p><b>Outbound Transformations</b></p>
+           <label style="display:flex;gap:8px;align-items:center;margin:8px 0 12px;">
+             <input id="transform-global-enabled-outbound" type="checkbox" />
+             <span>Enable transform rules globally</span>
+           </label>
+           <label for="outbound-default-expr" style="display:block;margin:8px 0 4px;">Default JSONata Expression</label>
+           <textarea id="outbound-default-expr" rows="4"
+             style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"></textarea>
+           <label for="outbound-fallback" style="display:block;margin:8px 0 4px;">Fallback</label>
+           <select id="outbound-fallback" style="width:100%;max-width:280px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;">
+             <option value="passthrough">passthrough</option>
+             <option value="transform_default">transform_default</option>
+             <option value="error">error</option>
+           </select>
+           <p style="margin:10px 0 6px;"><b>Rules</b></p>
+           <div id="outbound-rules-list" style="display:flex;flex-direction:column;gap:10px;"></div>
+           <div style="margin-top:8px;">
+             <button type="button" id="outbound-add-rule-btn">Add rule</button>
+           </div>
+           <hr style="margin:16px 0;border:none;border-top:1px solid #e2e8f0;" />
            <p><b>Enrichments</b></p>
            <label for="header-name" style="display:block;margin:8px 0 4px;">Header Key</label>
            <input id="header-name" type="text" placeholder="authorization"
@@ -154,7 +178,10 @@
              <button type="button" id="headers-save-btn">Add header</button>
            </div>
            <div id="headers-list" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;"></div>
-           <pre id="headers-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Header output appears here.</pre>
+           <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+             <button type="button" id="outbound-transform-save-btn">Save Outbound Transformations</button>
+           </div>
+           <pre id="headers-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Outbound transformation output appears here.</pre>
          </div>
          <div id="tab-inbound-auth" class="tab-panel" style="display:none;">
            <p><b>Inbound Auth</b></p>
@@ -179,6 +206,31 @@
            </div>
            <pre id="keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Rotation output appears here.</pre>
          </div>
+         <div id="tab-inbound-transform" class="tab-panel" style="display:none;">
+           <p><b>Inbound Transformations</b></p>
+           <label style="display:flex;gap:8px;align-items:center;margin:8px 0 12px;">
+             <input id="transform-global-enabled-inbound" type="checkbox" />
+             <span>Enable transform rules globally</span>
+           </label>
+           <label for="inbound-default-expr" style="display:block;margin:8px 0 4px;">Default JSONata Expression</label>
+           <textarea id="inbound-default-expr" rows="4"
+             style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"></textarea>
+           <label for="inbound-fallback" style="display:block;margin:8px 0 4px;">Fallback</label>
+           <select id="inbound-fallback" style="width:100%;max-width:280px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;">
+             <option value="passthrough">passthrough</option>
+             <option value="transform_default">transform_default</option>
+             <option value="error">error</option>
+           </select>
+           <p style="margin:10px 0 6px;"><b>Rules</b></p>
+           <div id="inbound-rules-list" style="display:flex;flex-direction:column;gap:10px;"></div>
+           <div style="margin-top:8px;">
+             <button type="button" id="inbound-add-rule-btn">Add rule</button>
+           </div>
+           <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+             <button type="button" id="inbound-transform-save-btn">Save Inbound Transformations</button>
+           </div>
+           <pre id="inbound-transform-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Inbound transformation output appears here.</pre>
+         </div>
          <div id="tab-sandbox" class="tab-panel" style="display:none;">
            <p><b>API Sandbox</b></p>
            <div style="flex:1;min-width:340px;">
@@ -196,12 +248,10 @@
                  style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
              </div>
              <label style="display:block;margin:4px 0 6px;">Endpoint</label>
-             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-               <select id="sandbox-verb" style="min-width:120px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;"></select>
-               <code>/_apiproxy/</code>
-               <select id="sandbox-path" style="min-width:260px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;"></select>
-             </div>
-             <p id="sandbox-base-url" style="margin:8px 0 0 0;"></p>
+             <p id="sandbox-base-url" style="margin:0 0 8px 0;"></p>
+             <select id="sandbox-path" style="min-width:260px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;"></select>
+             <label for="sandbox-verb" style="display:block;margin:8px 0 4px;">Method</label>
+             <select id="sandbox-verb" style="min-width:120px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;"></select>
              <label for="sandbox-url" style="display:block;margin:8px 0 4px;">Full Request URL (editable)</label>
              <input id="sandbox-url" type="text"
                style="width:100%;max-width:760px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />

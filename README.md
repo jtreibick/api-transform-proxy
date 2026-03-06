@@ -291,11 +291,11 @@ Wrangler-native KV provisioning:
   - Returns current config YAML (`text/yaml`).
 - `PUT /_apiproxy/admin/config`
   - Requires header `X-Admin-Key`.
-  - Accepts config YAML in request body.
+  - Accepts config body as either YAML (`text/yaml`, `application/yaml`, `application/x-yaml`) or JSON (`application/json`).
   - Validates and persists normalized config to KV.
 - `POST /_apiproxy/admin/config/validate`
   - Requires header `X-Admin-Key`.
-  - Accepts config YAML body.
+  - Accepts config body as either YAML (`text/yaml`, `application/yaml`, `application/x-yaml`) or JSON (`application/json`).
   - Returns normalized config without saving.
 - `POST /_apiproxy/admin/config/test-rule`
   - Requires header `X-Admin-Key`.
@@ -404,7 +404,16 @@ export PROXY_KEY="value-shown-by-bootstrap"
 curl -sS -X POST "$WORKER_URL/_apiproxy/admin/config/validate" \
   -H "X-Admin-Key: $ADMIN_KEY" \
   -H "Content-Type: text/yaml" \
-  --data-binary @examples/config-basic.yaml
+ --data-binary @examples/config-basic.yaml
+```
+
+Or validate config JSON:
+
+```bash
+curl -sS -X POST "$WORKER_URL/_apiproxy/admin/config/validate" \
+  -H "X-Admin-Key: $ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  --data '{"targetHost":null,"transform":{"enabled":true,"defaultExpr":"","fallback":"passthrough","rules":[]},"header_forwarding":{"mode":"blacklist","names":["connection","host","content-length","x-proxy-key","x-admin-key","x-issuer-key","x-proxy-host"]}}'
 ```
 
 2) Save config YAML:
@@ -413,7 +422,16 @@ curl -sS -X POST "$WORKER_URL/_apiproxy/admin/config/validate" \
 curl -sS -X PUT "$WORKER_URL/_apiproxy/admin/config" \
   -H "X-Admin-Key: $ADMIN_KEY" \
   -H "Content-Type: text/yaml" \
-  --data-binary @examples/config-basic.yaml
+ --data-binary @examples/config-basic.yaml
+```
+
+Or save config JSON:
+
+```bash
+curl -sS -X PUT "$WORKER_URL/_apiproxy/admin/config" \
+  -H "X-Admin-Key: $ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  --data '{"targetHost":null,"transform":{"enabled":true,"defaultExpr":"","fallback":"passthrough","rules":[]},"header_forwarding":{"mode":"blacklist","names":["connection","host","content-length","x-proxy-key","x-admin-key","x-issuer-key","x-proxy-host"]}}'
 ```
 
 3) Test transform rule matcher:

@@ -115,17 +115,34 @@ const CONFIG_SCHEMA_V1 = {
   },
   transform: {
     enabled: "boolean",
-    defaultExpr: "string",
-    fallback: "passthrough|error|transform_default",
-    rules: [
-      {
-        name: "string",
-        status: ["2xx", 422],
-        type: "json|text|binary|any",
-        headerMatch: { "x-example-header": "value-or-*contains*" },
-        expr: "string",
-      },
-    ],
+    outbound: {
+      enabled: "boolean",
+      defaultExpr: "string",
+      fallback: "passthrough|error|transform_default",
+      rules: [
+        {
+          name: "string",
+          method: ["GET", "POST"],
+          path: ["/v1/*"],
+          headerMatch: { "x-example-header": "value-or-*contains*" },
+          expr: "string",
+        },
+      ],
+    },
+    inbound: {
+      enabled: "boolean",
+      defaultExpr: "string",
+      fallback: "passthrough|error|transform_default",
+      rules: [
+        {
+          name: "string",
+          status: ["2xx", 422],
+          type: "json|text|binary|any",
+          headerMatch: { "x-example-header": "value-or-*contains*" },
+          expr: "string",
+        },
+      ],
+    },
   },
   header_forwarding: {
     mode: "blacklist|whitelist",
@@ -213,9 +230,18 @@ const DEFAULT_CONFIG_V1 = {
   },
   transform: {
     enabled: true,
-    defaultExpr: "",
-    fallback: "passthrough",
-    rules: [],
+    outbound: {
+      enabled: false,
+      defaultExpr: "",
+      fallback: "passthrough",
+      rules: [],
+    },
+    inbound: {
+      enabled: true,
+      defaultExpr: "",
+      fallback: "passthrough",
+      rules: [],
+    },
   },
   header_forwarding: {
     mode: "blacklist",
@@ -313,6 +339,14 @@ export default {
       if (normalizedPath === `${ADMIN_ROOT}/key-rotation-config` && request.method === "PUT") {
         await requireAdminAuth(request, env);
         return await handleKeyRotationConfigPut(request, env);
+      }
+      if (normalizedPath === `${ADMIN_ROOT}/transform-config` && request.method === "GET") {
+        await requireAdminAuth(request, env);
+        return await handleTransformConfigGet(env);
+      }
+      if (normalizedPath === `${ADMIN_ROOT}/transform-config` && request.method === "PUT") {
+        await requireAdminAuth(request, env);
+        return await handleTransformConfigPut(request, env);
       }
       if (normalizedPath === `${ADMIN_ROOT}/debug` && request.method === "GET") {
         await requireAdminAuth(request, env);
@@ -579,14 +613,14 @@ function validateAndNormalizeHeaderMatch(headerMatch, path, problems) {
   return normalized;
 }
 
-function validateAndNormalizeTransformRule(rule, index, problems) {
-  const path = `transform.rules[${index}]`;
+function validateAndNormalizeTransformRule(rule, index, problems, sectionPath, direction) {
+  const path = `${sectionPath}.rules[${index}]`;
   if (!isNonArrayObject(rule)) {
     pushProblem(problems, path, "must be an object");
     return null;
   }
 
-  ensureNoUnknownKeys(rule, new Set(["name", "status", "type", "headerMatch", "expr"]), path, problems);
+  ensureNoUnknownKeys(rule, new Set(["name", "status", "type", "method", "path", "headerMatch", "expr"]), path, problems);
 
   const name = typeof rule.name === "string" ? rule.name.trim() : "";
   if (!name) pushProblem(problems, `${path}.name`, "must be a non-empty string");
@@ -604,14 +638,55 @@ function validateAndNormalizeTransformRule(rule, index, problems) {
   }
 
   const headerMatch = validateAndNormalizeHeaderMatch(rule.headerMatch, `${path}.headerMatch`, problems);
+  const methodIn = rule.method;
+  let method = undefined;
+  if (methodIn !== undefined) {
+    if (!Array.isArray(methodIn)) {
+      pushProblem(problems, `${path}.method`, "must be an array of HTTP methods");
+    } else {
+      method = methodIn
+        .map((m, i) => {
+          if (typeof m !== "string" || !m.trim()) {
+            pushProblem(problems, `${path}.method[${i}]`, "must be a non-empty string");
+            return "";
+          }
+          return m.trim().toUpperCase();
+        })
+        .filter(Boolean);
+    }
+  }
+  const pathIn = rule.path;
+  let rulePath = undefined;
+  if (pathIn !== undefined) {
+    if (!Array.isArray(pathIn)) {
+      pushProblem(problems, `${path}.path`, "must be an array of path patterns");
+    } else {
+      rulePath = pathIn
+        .map((p, i) => {
+          if (typeof p !== "string" || !p.trim()) {
+            pushProblem(problems, `${path}.path[${i}]`, "must be a non-empty string");
+            return "";
+          }
+          return p.trim();
+        })
+        .filter(Boolean);
+    }
+  }
 
-  return {
+  const normalized = {
     name,
-    status,
-    type: type || "any",
-    ...(headerMatch ? { headerMatch } : {}),
     expr,
+    ...(headerMatch ? { headerMatch } : {}),
   };
+  if (direction === "inbound") {
+    normalized.status = status;
+    normalized.type = type || "any";
+  }
+  if (direction === "outbound") {
+    if (method && method.length > 0) normalized.method = method;
+    if (rulePath && rulePath.length > 0) normalized.path = rulePath;
+  }
+  return normalized;
 }
 
 function validateAndNormalizeConfigV1(configInput) {
@@ -712,7 +787,7 @@ function validateAndNormalizeConfigV1(configInput) {
     pushProblem(problems, "$.transform", "must be an object when provided");
   }
   if (isNonArrayObject(transformIn)) {
-    ensureNoUnknownKeys(transformIn, new Set(["enabled", "defaultExpr", "fallback", "rules"]), "$.transform", problems);
+    ensureNoUnknownKeys(transformIn, new Set(["enabled", "defaultExpr", "fallback", "rules", "outbound", "inbound"]), "$.transform", problems);
   }
 
   const enabled = transformIn.enabled === undefined ? true : transformIn.enabled;
@@ -720,25 +795,74 @@ function validateAndNormalizeConfigV1(configInput) {
     pushProblem(problems, "$.transform.enabled", "must be a boolean");
   }
 
-  const defaultExpr = transformIn.defaultExpr === undefined ? "" : transformIn.defaultExpr;
-  if (typeof defaultExpr !== "string") {
+  const hasSplitTransform = isNonArrayObject(transformIn) && (transformIn.outbound !== undefined || transformIn.inbound !== undefined);
+  const legacyDefaultExpr = transformIn.defaultExpr === undefined ? "" : transformIn.defaultExpr;
+  if (typeof legacyDefaultExpr !== "string") {
     pushProblem(problems, "$.transform.defaultExpr", "must be a string");
   }
-
-  const fallback = transformIn.fallback === undefined ? "passthrough" : String(transformIn.fallback);
-  if (!VALID_FALLBACK_VALUES.has(fallback)) {
+  const legacyFallback = transformIn.fallback === undefined ? "passthrough" : String(transformIn.fallback);
+  if (!VALID_FALLBACK_VALUES.has(legacyFallback)) {
     pushProblem(problems, "$.transform.fallback", "must be passthrough, error, or transform_default");
   }
-
-  const rulesIn = transformIn.rules === undefined ? [] : transformIn.rules;
-  if (!Array.isArray(rulesIn)) {
+  const legacyRulesIn = transformIn.rules === undefined ? [] : transformIn.rules;
+  if (!Array.isArray(legacyRulesIn)) {
     pushProblem(problems, "$.transform.rules", "must be an array");
   }
-  const rules = Array.isArray(rulesIn)
-    ? rulesIn
-        .map((rule, index) => validateAndNormalizeTransformRule(rule, index, problems))
-        .filter((rule) => rule !== null)
-    : [];
+
+  function normalizeTransformSection(sectionIn, path, direction, legacy) {
+    const src = sectionIn === undefined ? legacy : sectionIn;
+    if (!isNonArrayObject(src)) {
+      pushProblem(problems, path, "must be an object");
+      return { enabled: direction === "inbound", defaultExpr: "", fallback: "passthrough", rules: [] };
+    }
+    ensureNoUnknownKeys(src, new Set(["enabled", "defaultExpr", "fallback", "rules"]), path, problems);
+    const sectionEnabled = src.enabled === undefined ? (direction === "inbound") : src.enabled;
+    if (typeof sectionEnabled !== "boolean") {
+      pushProblem(problems, `${path}.enabled`, "must be a boolean");
+    }
+    const sectionDefaultExpr = src.defaultExpr === undefined ? "" : src.defaultExpr;
+    if (typeof sectionDefaultExpr !== "string") {
+      pushProblem(problems, `${path}.defaultExpr`, "must be a string");
+    }
+    const sectionFallback = src.fallback === undefined ? "passthrough" : String(src.fallback);
+    if (!VALID_FALLBACK_VALUES.has(sectionFallback)) {
+      pushProblem(problems, `${path}.fallback`, "must be passthrough, error, or transform_default");
+    }
+    const sectionRulesIn = src.rules === undefined ? [] : src.rules;
+    if (!Array.isArray(sectionRulesIn)) {
+      pushProblem(problems, `${path}.rules`, "must be an array");
+    }
+    const sectionRules = Array.isArray(sectionRulesIn)
+      ? sectionRulesIn
+          .map((rule, index) => validateAndNormalizeTransformRule(rule, index, problems, path, direction))
+          .filter((rule) => rule !== null)
+      : [];
+    return {
+      enabled: !!sectionEnabled,
+      defaultExpr: typeof sectionDefaultExpr === "string" ? sectionDefaultExpr : "",
+      fallback: VALID_FALLBACK_VALUES.has(sectionFallback) ? sectionFallback : "passthrough",
+      rules: sectionRules,
+    };
+  }
+
+  const legacySource = {
+    enabled: transformIn.enabled === undefined ? true : transformIn.enabled,
+    defaultExpr: legacyDefaultExpr,
+    fallback: legacyFallback,
+    rules: Array.isArray(legacyRulesIn) ? legacyRulesIn : [],
+  };
+  const outboundSection = normalizeTransformSection(
+    hasSplitTransform ? transformIn.outbound : undefined,
+    "$.transform.outbound",
+    "outbound",
+    DEFAULT_CONFIG_V1.transform.outbound
+  );
+  const inboundSection = normalizeTransformSection(
+    hasSplitTransform ? transformIn.inbound : undefined,
+    "$.transform.inbound",
+    "inbound",
+    hasSplitTransform ? DEFAULT_CONFIG_V1.transform.inbound : legacySource
+  );
 
   const debugIn = input.debug ?? {};
   if (!isNonArrayObject(debugIn)) {
@@ -874,9 +998,8 @@ function validateAndNormalizeConfigV1(configInput) {
     },
     transform: {
       enabled,
-      defaultExpr,
-      fallback,
-      rules,
+      outbound: outboundSection,
+      inbound: inboundSection,
     },
     header_forwarding: {
       mode,
@@ -1255,6 +1378,15 @@ function looksJson(contentType) {
   return contentType.includes("application/json") || contentType.includes("+json");
 }
 
+function looksYaml(contentType) {
+  return (
+    contentType.includes("text/yaml") ||
+    contentType.includes("application/yaml") ||
+    contentType.includes("application/x-yaml") ||
+    contentType.includes("text/x-yaml")
+  );
+}
+
 function isPlainObject(v) {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
@@ -1466,12 +1598,28 @@ function ruleMatches(rule, ctx) {
       }
     }
   }
+  if (Array.isArray(rule.method) && rule.method.length > 0) {
+    const ctxMethod = String(ctx.method || "").toUpperCase();
+    if (!rule.method.includes(ctxMethod)) {
+      reasons.push("method");
+    }
+  }
+  if (Array.isArray(rule.path) && rule.path.length > 0) {
+    const p = String(ctx.path || "");
+    const matched = rule.path.some((pattern) => {
+      const s = String(pattern || "");
+      if (!s) return false;
+      if (s.endsWith("*")) return p.startsWith(s.slice(0, -1));
+      return p === s;
+    });
+    if (!matched) reasons.push("path");
+  }
 
   return { matched: reasons.length === 0, reasons };
 }
 
-function selectTransformRule(config, ctx) {
-  const rules = Array.isArray(config?.transform?.rules) ? config.transform.rules : [];
+function selectTransformRule(section, ctx) {
+  const rules = Array.isArray(section?.rules) ? section.rules : [];
   const trace = [];
 
   for (const rule of rules) {
@@ -2079,8 +2227,11 @@ async function handleConfigGet(env) {
 
 async function handleConfigPut(request, env) {
   const maxReq = getEnvInt(env, "MAX_REQ_BYTES", DEFAULTS.MAX_REQ_BYTES);
-  const yamlText = await readTextWithLimit(request, maxReq);
-  const normalized = await saveConfigFromYamlV1(yamlText, env);
+  const parsed = await readConfigInputByContentType(request, maxReq);
+  const normalized =
+    parsed.format === "yaml"
+      ? await saveConfigFromYamlV1(parsed.yamlText, env)
+      : await saveConfigObjectV1(parsed.config, env);
   return jsonResponse(200, {
     ok: true,
     data: {
@@ -2093,8 +2244,8 @@ async function handleConfigPut(request, env) {
 
 async function handleConfigValidate(request, env) {
   const maxReq = getEnvInt(env, "MAX_REQ_BYTES", DEFAULTS.MAX_REQ_BYTES);
-  const yamlText = await readTextWithLimit(request, maxReq);
-  const normalized = await parseYamlConfigText(yamlText);
+  const parsed = await readConfigInputByContentType(request, maxReq);
+  const normalized = parsed.config;
   return jsonResponse(200, {
     ok: true,
     data: {
@@ -2103,6 +2254,23 @@ async function handleConfigValidate(request, env) {
     },
     meta: {},
   });
+}
+
+async function readConfigInputByContentType(request, maxBytes) {
+  const contentType = getStoredContentType(request.headers);
+  if (looksJson(contentType)) {
+    const body = await readJsonWithLimit(request, maxBytes);
+    if (!isPlainObject(body)) {
+      throw new HttpError(400, "INVALID_CONFIG", "Configuration JSON must be an object");
+    }
+    return { format: "json", config: validateAndNormalizeConfigV1(body) };
+  }
+  if (looksYaml(contentType)) {
+    const yamlText = await readTextWithLimit(request, maxBytes);
+    const normalized = await parseYamlConfigText(yamlText);
+    return { format: "yaml", config: normalized, yamlText };
+  }
+  throw new HttpError(415, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json or text/yaml");
 }
 
 async function handleConfigTestRule(request, env) {
@@ -2146,15 +2314,16 @@ async function handleConfigTestRule(request, env) {
   }
 
   const ctx = { status, headers, type };
-  const { matchedRule, trace } = selectTransformRule(config, ctx);
+  const inboundSection = config?.transform?.inbound || DEFAULT_CONFIG_V1.transform.inbound;
+  const { matchedRule, trace } = selectTransformRule(inboundSection, ctx);
 
   let expression = null;
   let source = "none";
   if (matchedRule) {
     expression = matchedRule.expr;
     source = `rule:${matchedRule.name}`;
-  } else if (config.transform.fallback === "transform_default" && config.transform.defaultExpr) {
-    expression = config.transform.defaultExpr;
+  } else if (inboundSection.fallback === "transform_default" && inboundSection.defaultExpr) {
+    expression = inboundSection.defaultExpr;
     source = "defaultExpr";
   }
 
@@ -2178,7 +2347,7 @@ async function handleConfigTestRule(request, env) {
     data: {
       matched_rule: matchedRule ? matchedRule.name : null,
       expression_source: source,
-      fallback_behavior: config.transform.fallback,
+      fallback_behavior: inboundSection.fallback,
       output,
       trace,
     },
@@ -2274,6 +2443,81 @@ async function handleKeyRotationConfigPut(request, env) {
       message: "Key rotation configuration updated",
       key_rotation: normalized.targetCredentialRotation,
       api_key_policy: normalized.apiKeyPolicy,
+    },
+    meta: {},
+  });
+}
+
+function normalizeTransformRuleInput(rule, direction) {
+  if (!isNonArrayObject(rule)) return null;
+  const out = {
+    name: String(rule.name || "").trim(),
+    expr: String(rule.expr || ""),
+  };
+  if (!out.name || !out.expr.trim()) return null;
+  if (direction === "inbound") {
+    if (Array.isArray(rule.status)) out.status = rule.status;
+    out.type = String(rule.type || "any").toLowerCase();
+  }
+  if (direction === "outbound") {
+    if (Array.isArray(rule.method)) out.method = rule.method.map((m) => String(m || "").toUpperCase()).filter(Boolean);
+    if (Array.isArray(rule.path)) out.path = rule.path.map((p) => String(p || "")).filter(Boolean);
+  }
+  if (isNonArrayObject(rule.headerMatch)) out.headerMatch = rule.headerMatch;
+  return out;
+}
+
+async function handleTransformConfigGet(env) {
+  const config = await loadConfigV1(env);
+  const transform = config?.transform || DEFAULT_CONFIG_V1.transform;
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      enabled: transform.enabled !== false,
+      outbound: transform.outbound || DEFAULT_CONFIG_V1.transform.outbound,
+      inbound: transform.inbound || DEFAULT_CONFIG_V1.transform.inbound,
+    },
+    meta: {},
+  });
+}
+
+async function handleTransformConfigPut(request, env) {
+  enforceInvokeContentType(request);
+  const body = await readJsonWithLimit(request, getEnvInt(env, "MAX_REQ_BYTES", DEFAULTS.MAX_REQ_BYTES));
+  const existing = await loadConfigV1(env);
+  const currentTransform = existing?.transform || DEFAULT_CONFIG_V1.transform;
+  const outboundIn = isNonArrayObject(body?.outbound) ? body.outbound : currentTransform.outbound;
+  const inboundIn = isNonArrayObject(body?.inbound) ? body.inbound : currentTransform.inbound;
+  const outboundRules = Array.isArray(outboundIn?.rules)
+    ? outboundIn.rules.map((r) => normalizeTransformRuleInput(r, "outbound")).filter((r) => r !== null)
+    : [];
+  const inboundRules = Array.isArray(inboundIn?.rules)
+    ? inboundIn.rules.map((r) => normalizeTransformRuleInput(r, "inbound")).filter((r) => r !== null)
+    : [];
+  const next = {
+    ...existing,
+    transform: {
+      enabled: body?.enabled === undefined ? currentTransform.enabled !== false : !!body.enabled,
+      outbound: {
+        enabled: outboundIn?.enabled === undefined ? !!currentTransform?.outbound?.enabled : !!outboundIn.enabled,
+        defaultExpr: String(outboundIn?.defaultExpr ?? currentTransform?.outbound?.defaultExpr ?? ""),
+        fallback: String(outboundIn?.fallback ?? currentTransform?.outbound?.fallback ?? "passthrough"),
+        rules: outboundRules,
+      },
+      inbound: {
+        enabled: inboundIn?.enabled === undefined ? !!currentTransform?.inbound?.enabled : !!inboundIn.enabled,
+        defaultExpr: String(inboundIn?.defaultExpr ?? currentTransform?.inbound?.defaultExpr ?? ""),
+        fallback: String(inboundIn?.fallback ?? currentTransform?.inbound?.fallback ?? "passthrough"),
+        rules: inboundRules,
+      },
+    },
+  };
+  const normalized = await saveConfigObjectV1(next, env);
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      message: "Transform configuration updated",
+      transform: normalized.transform,
     },
     meta: {},
   });
@@ -2829,6 +3073,9 @@ async function handleRequestCore(request, env, payload, ctx) {
   const transformTimeoutMs = getEnvInt(env, "TRANSFORM_TIMEOUT_MS", DEFAULTS.TRANSFORM_TIMEOUT_MS);
 
   const config = await loadConfigV1(env);
+  const transformGlobalEnabled = config?.transform?.enabled !== false;
+  const outboundTransformConfig = config?.transform?.outbound || DEFAULT_CONFIG_V1.transform.outbound;
+  const inboundTransformConfig = config?.transform?.inbound || DEFAULT_CONFIG_V1.transform.inbound;
   const redactHeaderSet = getDebugRedactHeaderSet(config);
   const debugRequested = String(request.headers.get("X-Proxy-Debug") || "").trim() === "1";
   const debugActive = debugRequested ? await isDebugEnabled(env) : false;
@@ -2850,6 +3097,68 @@ async function handleRequestCore(request, env, payload, ctx) {
     : null;
   const proxyHost = resolveProxyHostForRequest(request, config);
   const headerForwardingPolicy = getHeaderForwardingPolicy(config);
+
+  if (transformGlobalEnabled && outboundTransformConfig.enabled) {
+    const outboundCtx = {
+      method: String(payload?.upstream?.method || "").toUpperCase(),
+      path: String(payload?.upstream?.url || ""),
+      headers: normalizeHeaderMap(payload?.upstream?.headers || {}),
+    };
+    const { matchedRule, trace } = selectTransformRule(outboundTransformConfig, outboundCtx);
+    let outboundExpr = "";
+    let outboundSource = "none";
+    if (matchedRule) {
+      outboundExpr = matchedRule.expr || "";
+      outboundSource = `rule:${matchedRule.name}`;
+    } else if (outboundTransformConfig.fallback === "transform_default" && outboundTransformConfig.defaultExpr) {
+      outboundExpr = outboundTransformConfig.defaultExpr;
+      outboundSource = "defaultExpr";
+    } else if (outboundTransformConfig.fallback === "error") {
+      throw new HttpError(422, "TRANSFORM_RULE_NOT_MATCHED", "No outbound transform rule matched and fallback is set to error", {
+        trace,
+      });
+    }
+    if (outboundExpr) {
+      const exprBytes = new TextEncoder().encode(outboundExpr).byteLength;
+      if (exprBytes > maxExpr) {
+        throw new HttpError(413, "EXPR_TOO_LARGE", `outbound transform expression exceeds ${maxExpr} bytes`);
+      }
+      let outboundOutput;
+      try {
+        outboundOutput = await evalJsonataWithTimeout(
+          outboundExpr,
+          {
+            upstream: payload.upstream,
+            request_headers: normalizeHeaderMap(request.headers),
+          },
+          transformTimeoutMs
+        );
+      } catch (e) {
+        throw new HttpError(422, "TRANSFORM_ERROR", "Outbound JSONata evaluation failed", {
+          cause: String(e?.message || e),
+          source: outboundSource,
+        });
+      }
+      let nextUpstream = null;
+      if (isPlainObject(outboundOutput?.upstream)) {
+        nextUpstream = outboundOutput.upstream;
+      } else if (isPlainObject(outboundOutput)) {
+        nextUpstream = outboundOutput;
+      } else {
+        throw new HttpError(422, "TRANSFORM_ERROR", "Outbound transform must return an object", {
+          source: outboundSource,
+        });
+      }
+      const nextPayload = { ...payload, upstream: nextUpstream };
+      const outboundProblems = validateInvokePayload(nextPayload, { allowMissingUrl: true });
+      if (outboundProblems.length > 0) {
+        throw new HttpError(422, "TRANSFORM_ERROR", "Outbound transform produced an invalid request payload", {
+          problems: outboundProblems,
+        });
+      }
+      payload = nextPayload;
+    }
+  }
 
   let upstreamUrl;
   try {
@@ -3008,8 +3317,7 @@ async function handleRequestCore(request, env, payload, ctx) {
     response_bytes: responseBytes.byteLength,
   };
 
-  const transformConfig = config.transform || DEFAULT_CONFIG_V1.transform;
-  if (!transformConfig.enabled) {
+  if (!transformGlobalEnabled || !inboundTransformConfig.enabled) {
     if (responseType === "json" && jsonBody === null) {
       const debugHeaders = await emitDebugTrace(
         {
@@ -3046,17 +3354,17 @@ async function handleRequestCore(request, env, payload, ctx) {
     type: responseType,
     headers: responseHeadersMap,
   };
-  const { matchedRule, trace } = selectTransformRule(config, ruleCtx);
+  const { matchedRule, trace } = selectTransformRule(inboundTransformConfig, ruleCtx);
 
   let expr = "";
   let transformSource = "none";
   if (matchedRule) {
     expr = matchedRule.expr || "";
     transformSource = `rule:${matchedRule.name}`;
-  } else if (transformConfig.fallback === "transform_default" && transformConfig.defaultExpr) {
-    expr = transformConfig.defaultExpr;
+  } else if (inboundTransformConfig.fallback === "transform_default" && inboundTransformConfig.defaultExpr) {
+    expr = inboundTransformConfig.defaultExpr;
     transformSource = "defaultExpr";
-  } else if (transformConfig.fallback === "passthrough") {
+  } else if (inboundTransformConfig.fallback === "passthrough") {
     if (responseType === "json" && jsonBody === null) {
       const debugHeaders = await emitDebugTrace(
         {
