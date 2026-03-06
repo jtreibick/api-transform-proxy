@@ -202,6 +202,24 @@ Or use the helper script:
 npm run bootstrap:master-key
 ```
 
+One-command deploy (ensure KV + master key, then deploy):
+
+```bash
+npm run deploy:cf
+```
+
+KV bootstrap helper (creates CONFIG namespace if missing and updates `wrangler.toml`):
+
+```bash
+npm run bootstrap:kv
+```
+
+To rotate/overwrite the master key intentionally:
+
+```bash
+bash scripts/bootstrap-master-key.sh --force
+```
+
 
 
 ## Endpoints
