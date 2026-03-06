@@ -366,9 +366,6 @@
               keyRotationLoad();
               keysRefresh();
             }
-            if (name === 'jwt') {
-              keysRefresh();
-            }
             if (name === 'inbound-transform') transformConfigLoad();
             if (name === 'sandbox') sandboxInit();
             currentTabName = name;
@@ -668,7 +665,6 @@
             if (el('kr-admin-expiry')) el('kr-admin-expiry').value = d.admin_expiry_seconds == null ? '' : String(d.admin_expiry_seconds);
             if (el('kr-output')) el('kr-output').textContent = '';
             clearDirty('outbound-auth');
-            clearDirty('jwt');
           } catch (e) {
             setOutput('kr-output', String(e.message || e));
           }
@@ -714,6 +710,21 @@
         }
         async function inboundAuthSave() {
           try {
+            const yaml = await apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true);
+            const updatedYaml = applyJwtEnabledToYaml(yaml, !!el('jwt-enabled')?.checked);
+            const cfgRes = await fetch(ADMIN_ROOT + '/config', {
+              method: 'PUT',
+              headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'text/yaml' },
+              body: updatedYaml,
+            });
+            if (cfgRes.status === 401) {
+              handleUnauthorized();
+              throw new Error('Unauthorized (401)');
+            }
+            if (!cfgRes.ok) {
+              const text = await cfgRes.text();
+              throw new Error(text || 'Failed to save JWT settings');
+            }
             const current = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'GET');
             const d = current?.data || {};
             const payload = {
@@ -727,7 +738,7 @@
               refresh_skew_seconds: Number(d.refresh_skew_seconds || 0),
               retry_once_on_401: !!d.retry_once_on_401,
               proxy_expiry_seconds: normalizeNullableIntegerInput(el('kr-proxy-expiry')?.value),
-              issuer_expiry_seconds: d.issuer_expiry_seconds ?? null,
+              issuer_expiry_seconds: normalizeNullableIntegerInput(el('kr-issuer-expiry')?.value),
               admin_expiry_seconds: d.admin_expiry_seconds ?? null,
               static_header_key: d.static_header_key ?? null,
               static_header_value: d.static_header_value ?? null,
@@ -780,49 +791,6 @@
             clearDirty('admin-auth');
           } catch (e) {
             setOutput('admin-keys-output', String(e.message || e));
-          }
-        }
-        async function jwtSave() {
-          try {
-            const yaml = await apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true);
-            const updatedYaml = applyJwtEnabledToYaml(yaml, !!el('jwt-enabled')?.checked);
-            const res = await fetch(ADMIN_ROOT + '/config', {
-              method: 'PUT',
-              headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'text/yaml' },
-              body: updatedYaml,
-            });
-            if (res.status === 401) {
-              handleUnauthorized();
-              throw new Error('Unauthorized (401)');
-            }
-            if (!res.ok) {
-              const text = await res.text();
-              throw new Error(text || 'Failed to save JWT settings');
-            }
-            const current = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'GET');
-            const d = current?.data || {};
-            const payload = {
-              enabled: !!d.enabled,
-              strategy: d.strategy || 'json_ttl',
-              request_yaml: d.request_yaml || '',
-              key_path: d.key_path || '',
-              ttl_path: d.ttl_path ?? null,
-              ttl_unit: d.ttl_unit || 'seconds',
-              expires_at_path: d.expires_at_path ?? null,
-              refresh_skew_seconds: Number(d.refresh_skew_seconds || 0),
-              retry_once_on_401: !!d.retry_once_on_401,
-              proxy_expiry_seconds: d.proxy_expiry_seconds ?? null,
-              issuer_expiry_seconds: normalizeNullableIntegerInput(el('kr-issuer-expiry')?.value),
-              admin_expiry_seconds: d.admin_expiry_seconds ?? null,
-              static_header_key: d.static_header_key ?? null,
-              static_header_value: d.static_header_value ?? null,
-            };
-            const out = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'PUT', payload);
-            setOutput('issuer-keys-output', out);
-            await keysRefresh();
-            clearDirty('jwt');
-          } catch (e) {
-            setOutput('issuer-keys-output', String(e.message || e));
           }
         }
          function setOutboundAuthEnabled(enabled) {
@@ -1804,7 +1772,6 @@
           });
           el('footer-save-inbound-auth')?.addEventListener('click', inboundAuthSave);
           el('footer-save-admin-auth')?.addEventListener('click', adminAuthSave);
-          el('footer-save-jwt')?.addEventListener('click', jwtSave);
           el('jwt-enabled')?.addEventListener('change', () => {
             setJwtEnabled(!!el('jwt-enabled')?.checked);
           });

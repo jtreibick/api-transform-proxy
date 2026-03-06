@@ -32,8 +32,6 @@
            <div style="margin-top:6px;font-size:12px;color:#64748b;font-weight:700;text-transform:uppercase;">Inbound</div>
            <button type="button" class="tab-btn tab-child" data-tab="inbound-auth">Inbound Auth</button>
            <button type="button" class="tab-btn tab-child" data-tab="inbound-transform">Inbound Transformations</button>
-           <div style="margin-top:6px;font-size:12px;color:#64748b;font-weight:700;text-transform:uppercase;">JWT</div>
-           <button type="button" class="tab-btn tab-child" data-tab="jwt">JSON Web Token (JWT)</button>
            <button type="button" class="tab-btn" data-tab="config">Config</button>
            <a href="#" id="logout-link" style="margin-top:14px;font-size:14px;color:#0f172a;text-decoration:underline;">Log out</a>
          </div>
@@ -225,7 +223,29 @@
            <div style="display:flex;gap:8px;flex-wrap:wrap;">
              <button type="button" id="rotate-proxy-btn">Rotate proxy key</button>
            </div>
-          <pre id="keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;"></pre>
+           <hr style="margin:16px 0;border:none;border-top:1px solid #e2e8f0;" />
+           <p><b>JSON Web Token (JWT)</b></p>
+           <label style="display:flex;gap:8px;align-items:center;margin:8px 0 10px;">
+             <input id="jwt-enabled" type="checkbox" />
+             <span>Enable JWT Authentication</span>
+           </label>
+           <label for="jwt-endpoint-url" style="display:block;margin:8px 0 4px;">JWT Endpoint URL</label>
+           <input id="jwt-endpoint-url" type="text" readonly
+             style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;" />
+           <div id="jwt-fields" style="display:none;">
+             <label for="kr-issuer-expiry" style="display:block;margin:10px 0 4px;">Issuer Auth Token Expiry Seconds</label>
+             <input id="kr-issuer-expiry" type="text" placeholder="n/a"
+               style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+             <div style="display:flex;align-items:center;gap:8px;margin:10px 0 6px;">
+               <b>Issuer Key Status</b>
+               <a href="#" id="keys-refresh-link-issuer">refresh</a>
+             </div>
+             <div id="keys-status-issuer" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin-bottom:10px;">Issuer key status will appear here.</div>
+             <div style="display:flex;gap:8px;flex-wrap:wrap;">
+               <button type="button" id="rotate-issuer-btn">Rotate issuer key</button>
+             </div>
+             <pre id="issuer-keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;"></pre>
+           </div>
           <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
             <button type="button" id="footer-save-inbound-auth" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
           </div>
@@ -247,33 +267,6 @@
           <pre id="admin-keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;"></pre>
           <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
             <button type="button" id="footer-save-admin-auth" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
-          </div>
-        </div>
-        <div id="tab-jwt" class="tab-panel" style="display:none;">
-          <p><b>JSON Web Token (JWT)</b></p>
-          <label style="display:flex;gap:8px;align-items:center;margin:8px 0 10px;">
-            <input id="jwt-enabled" type="checkbox" />
-            <span>Enable JWT Authentication</span>
-          </label>
-          <label for="jwt-endpoint-url" style="display:block;margin:8px 0 4px;">JWT Endpoint URL</label>
-          <input id="jwt-endpoint-url" type="text" readonly
-            style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;" />
-          <div id="jwt-fields" style="display:none;">
-            <label for="kr-issuer-expiry" style="display:block;margin:10px 0 4px;">Issuer Auth Key Expiry Seconds</label>
-            <input id="kr-issuer-expiry" type="text" placeholder="n/a"
-              style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
-            <div style="display:flex;align-items:center;gap:8px;margin:10px 0 6px;">
-              <b>Issuer Key Status</b>
-              <a href="#" id="keys-refresh-link-issuer">refresh</a>
-            </div>
-            <div id="keys-status-issuer" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin-bottom:10px;">Issuer key status will appear here.</div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <button type="button" id="rotate-issuer-btn">Rotate issuer key</button>
-            </div>
-            <pre id="issuer-keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;"></pre>
-          </div>
-          <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
-            <button type="button" id="footer-save-jwt" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
           </div>
         </div>
         <div id="tab-inbound-transform" class="tab-panel" style="display:none;">
