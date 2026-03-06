@@ -1,12 +1,25 @@
+import {
+  FAVICON_DATA_URL,
+  htmlPage,
+  escapeHtml,
+  capitalize,
+  renderOnboardingHeader,
+  renderAdminLoginOptions,
+  renderInitAdminLoginScript,
+  renderSecretField,
+  renderSecretFieldScript,
+} from "./ui.js";
+
 /**
  * API transform relay for Bubble-style clients.
  *
  * Endpoints:
  * - GET /_apiproxy               : status + bootstrap page (shows created keys once)
+ * - POST /_apiproxy              : bootstrap keys via JSON (one-time; returns only newly created keys)
  * - POST /_apiproxy/request      : authenticated relay + optional JSONata transform
  * - GET /_apiproxy/admin/version : build version info (admin key required)
- * - POST /_apiproxy/admin/rotate : authenticated key rotation (admin key required)
- * - POST /_apiproxy/admin/rotate-admin : authenticated admin key rotation
+ * - POST /_apiproxy/keys/{proxy|issuer|admin}/rotate : self-rotation using each key kind
+ * - POST /_apiproxy/admin/keys/{proxy|issuer|admin}/rotate : admin override rotation
  * - GET/PUT /_apiproxy/admin/config
  * - POST /_apiproxy/admin/config/validate
  * - POST /_apiproxy/admin/config/test-rule
@@ -17,17 +30,25 @@
 
 const KV_PROXY_KEY = "proxy_key";
 const KV_ADMIN_KEY = "admin_key";
+const KV_ISSUER_KEY = "issuer_key";
 const KV_PROXY_KEY_OLD = "proxy_key_old";
 const KV_PROXY_KEY_OLD_EXPIRES_AT = "proxy_key_old_expires_at";
-const KV_PROXY_KEY_ROTATED_AT = "proxy_key_rotated_at";
-const KV_ADMIN_KEY_ROTATED_AT = "admin_key_rotated_at";
+const KV_PROXY_PRIMARY_KEY_CREATED_AT = "proxy_primary_key_created_at";
+const KV_PROXY_SECONDARY_KEY_CREATED_AT = "proxy_secondary_key_created_at";
+const KV_ISSUER_KEY_OLD = "issuer_key_old";
+const KV_ISSUER_KEY_OLD_EXPIRES_AT = "issuer_key_old_expires_at";
+const KV_ISSUER_PRIMARY_KEY_CREATED_AT = "issuer_primary_key_created_at";
+const KV_ISSUER_SECONDARY_KEY_CREATED_AT = "issuer_secondary_key_created_at";
+const KV_ADMIN_KEY_OLD = "admin_key_old";
+const KV_ADMIN_KEY_OLD_EXPIRES_AT = "admin_key_old_expires_at";
+const KV_ADMIN_PRIMARY_KEY_CREATED_AT = "admin_primary_key_created_at";
+const KV_ADMIN_SECONDARY_KEY_CREATED_AT = "admin_secondary_key_created_at";
 const KV_CONFIG_YAML = "config_yaml_v1";
 const KV_CONFIG_JSON = "config_json_v1";
 const KV_ENRICHED_HEADER_PREFIX = "enriched_header:";
 const KV_BOOTSTRAP_ENRICHED_HEADER_NAMES = "bootstrap_enriched_header_names_v1";
 const KV_DEBUG_ENABLED_UNTIL_MS = "debug_enabled_until_ms";
 const KV_DEBUG_LOGGING_SECRET = "debug_logging_secret";
-const KV_ADMIN_ACCESS_TOKEN_PREFIX = "admin_access_token:";
 const RESERVED_ROOT = "/_apiproxy";
 const ADMIN_ROOT = `${RESERVED_ROOT}/admin`;
 const DEFAULT_DOCS_URL = "https://github.com/jtreibick/api-transform-proxy/blob/main/README.md";
@@ -61,9 +82,28 @@ const EXPECTED_REQUEST_SCHEMA = {
 // Step 1 contract freeze: root config schema (YAML externally, normalized JSON internally).
 const CONFIG_SCHEMA_V1 = {
   targetHost: "string|null",
+  apiKeyPolicy: {
+    proxyExpirySeconds: "integer|null",
+    issuerExpirySeconds: "integer|null",
+    adminExpirySeconds: "integer|null",
+  },
+  targetCredentialRotation: {
+    enabled: "boolean",
+    strategy: "json_ttl|oauth_client_credentials",
+    request: "object",
+    response: {
+      key_path: "string",
+      ttl_path: "string|null",
+      ttl_unit: "seconds|minutes|hours",
+      expires_at_path: "string|null",
+    },
+    trigger: {
+      refresh_skew_seconds: "integer>=0",
+      retry_once_on_401: "boolean",
+    },
+  },
   debug: {
-    max_ttl_seconds: "integer (1-604800)",
-    redact_headers: ["header-name"],
+    max_debug_session_seconds: "integer (1-604800)",
     loggingEndpoint: {
       url: "string|null",
       auth_header: "string|null",
@@ -110,8 +150,8 @@ const HOP_BY_HOP_HEADERS = new Set([
   "host",
   "content-length",
 ]);
-const INTERNAL_AUTH_HEADERS = new Set(["x-proxy-key", "x-admin-key"]);
-const PROXY_HOST_HEADER_NAMES = ["X-Proxy-Host", "XProxyHost"];
+const INTERNAL_AUTH_HEADERS = new Set(["x-proxy-key", "x-admin-key", "x-issuer-key"]);
+const PROXY_HOST_HEADER_NAMES = ["X-Proxy-Host"];
 const PROXY_HOST_HEADER_NAMES_LOWER = new Set(PROXY_HOST_HEADER_NAMES.map((n) => n.toLowerCase()));
 const VALID_FALLBACK_VALUES = new Set(["passthrough", "error", "transform_default"]);
 const VALID_TRANSFORM_TYPES = new Set(["json", "text", "binary", "any"]);
@@ -122,11 +162,46 @@ const DEFAULT_HEADER_FORWARDING_NAMES = [
   ...INTERNAL_AUTH_HEADERS,
   ...PROXY_HOST_HEADER_NAMES_LOWER,
 ];
+const BUILTIN_DEBUG_REDACT_HEADERS = new Set([
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "set-cookie",
+  "x-proxy-key",
+  "x-admin-key",
+]);
 const DEFAULT_CONFIG_V1 = {
   targetHost: null,
+  apiKeyPolicy: {
+    proxyExpirySeconds: null,
+    issuerExpirySeconds: null,
+    adminExpirySeconds: null,
+  },
+  targetCredentialRotation: {
+    enabled: false,
+    strategy: "json_ttl",
+    request: {
+      method: "POST",
+      url: "",
+      headers: {},
+      body: {
+        type: "json",
+        value: {},
+      },
+    },
+    response: {
+      key_path: "data.apiKey",
+      ttl_path: "data.ttl",
+      ttl_unit: "seconds",
+      expires_at_path: null,
+    },
+    trigger: {
+      refresh_skew_seconds: 300,
+      retry_once_on_401: true,
+    },
+  },
   debug: {
-    max_ttl_seconds: 3600,
-    redact_headers: ["authorization", "proxy-authorization", "cookie", "set-cookie", "x-proxy-key", "x-admin-key"],
+    max_debug_session_seconds: 3600,
     loggingEndpoint: {
       url: null,
       auth_header: null,
@@ -149,15 +224,6 @@ let jsonataFactory = null;
 let yamlApi = null;
 let lastDebugTrace = null;
 
-const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72">
-  <rect width="72" height="72" rx="16" fill="#0f172a"/>
-  <path d="M24 15L11 24v24l13 9" fill="none" stroke="#e2e8f0" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M48 15l13 9v24l-13 9" fill="none" stroke="#e2e8f0" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M39 9L25 36h8l-3 27 16-31h-9z" fill="#22d3ee"/>
-</svg>`;
-
-const FAVICON_DATA_URL = `data:image/svg+xml,${encodeURIComponent(FAVICON_SVG)}`;
-
 export default {
   async fetch(request, env, ctx) {
     const { pathname } = new URL(request.url);
@@ -173,6 +239,9 @@ export default {
       if (normalizedPath === RESERVED_ROOT && request.method === "GET") {
         return await handleStatusPage(env, request);
       }
+      if (normalizedPath === RESERVED_ROOT && request.method === "POST") {
+        return await handleBootstrapPost(env);
+      }
       if (normalizedPath === `${RESERVED_ROOT}/request` && request.method === "POST") {
         return await handleRequest(request, env, ctx);
       }
@@ -187,13 +256,29 @@ export default {
         await requireAdminAuth(request, env);
         return handleVersion(env);
       }
-      if (normalizedPath === `${ADMIN_ROOT}/rotate` && request.method === "POST") {
-        await requireAdminAuth(request, env);
-        return await handleRotate(request, env);
+      if (normalizedPath === `${RESERVED_ROOT}/keys/proxy/rotate` && request.method === "POST") {
+        await requireProxyKey(request, env);
+        return await handleRotateByKind("proxy", request, env);
       }
-      if (normalizedPath === `${ADMIN_ROOT}/rotate-admin` && request.method === "POST") {
+      if (normalizedPath === `${RESERVED_ROOT}/keys/issuer/rotate` && request.method === "POST") {
+        await requireIssuerKey(request, env);
+        return await handleRotateByKind("issuer", request, env);
+      }
+      if (normalizedPath === `${RESERVED_ROOT}/keys/admin/rotate` && request.method === "POST") {
         await requireAdminAuth(request, env);
-        return await handleRotateAdmin(request, env);
+        return await handleRotateByKind("admin", request, env);
+      }
+      if (normalizedPath === `${ADMIN_ROOT}/keys/proxy/rotate` && request.method === "POST") {
+        await requireAdminAuth(request, env);
+        return await handleRotateByKind("proxy", request, env);
+      }
+      if (normalizedPath === `${ADMIN_ROOT}/keys/issuer/rotate` && request.method === "POST") {
+        await requireAdminAuth(request, env);
+        return await handleRotateByKind("issuer", request, env);
+      }
+      if (normalizedPath === `${ADMIN_ROOT}/keys/admin/rotate` && request.method === "POST") {
+        await requireAdminAuth(request, env);
+        return await handleRotateByKind("admin", request, env);
       }
       if (normalizedPath === `${ADMIN_ROOT}/keys` && request.method === "GET") {
         await requireAdminAuth(request, env);
@@ -214,6 +299,14 @@ export default {
       if (normalizedPath === `${ADMIN_ROOT}/config/test-rule` && request.method === "POST") {
         await requireAdminAuth(request, env);
         return await handleConfigTestRule(request, env);
+      }
+      if (normalizedPath === `${ADMIN_ROOT}/key-rotation-config` && request.method === "GET") {
+        await requireAdminAuth(request, env);
+        return await handleKeyRotationConfigGet(env);
+      }
+      if (normalizedPath === `${ADMIN_ROOT}/key-rotation-config` && request.method === "PUT") {
+        await requireAdminAuth(request, env);
+        return await handleKeyRotationConfigPut(request, env);
       }
       if (normalizedPath === `${ADMIN_ROOT}/debug` && request.method === "GET") {
         await requireAdminAuth(request, env);
@@ -506,7 +599,12 @@ function validateAndNormalizeConfigV1(configInput) {
     });
   }
 
-  ensureNoUnknownKeys(input, new Set(["targetHost", "debug", "transform", "header_forwarding"]), "$", problems);
+  ensureNoUnknownKeys(
+    input,
+    new Set(["targetHost", "apiKeyPolicy", "targetCredentialRotation", "debug", "transform", "header_forwarding"]),
+    "$",
+    problems
+  );
 
   const targetHostRaw = input.targetHost;
   let targetHost = null;
@@ -518,6 +616,70 @@ function validateAndNormalizeConfigV1(configInput) {
       targetHost = normalizedTarget || null;
     }
   }
+
+  const apiKeyPolicyIn = input.apiKeyPolicy ?? {};
+  if (!isNonArrayObject(apiKeyPolicyIn)) {
+    pushProblem(problems, "$.apiKeyPolicy", "must be an object when provided");
+  }
+  if (isNonArrayObject(apiKeyPolicyIn)) {
+    ensureNoUnknownKeys(
+      apiKeyPolicyIn,
+      new Set(["proxyExpirySeconds", "issuerExpirySeconds", "adminExpirySeconds"]),
+      "$.apiKeyPolicy",
+      problems
+    );
+  }
+
+  function readExpirySeconds(raw, path) {
+    if (raw === undefined || raw === null) return null;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 1) {
+      pushProblem(problems, path, "must be a positive integer or null");
+      return null;
+    }
+    return n;
+  }
+
+  const proxyExpirySeconds = readExpirySeconds(isNonArrayObject(apiKeyPolicyIn) ? apiKeyPolicyIn.proxyExpirySeconds : undefined, "$.apiKeyPolicy.proxyExpirySeconds");
+  const issuerExpirySeconds = readExpirySeconds(isNonArrayObject(apiKeyPolicyIn) ? apiKeyPolicyIn.issuerExpirySeconds : undefined, "$.apiKeyPolicy.issuerExpirySeconds");
+  const adminExpirySeconds = readExpirySeconds(isNonArrayObject(apiKeyPolicyIn) ? apiKeyPolicyIn.adminExpirySeconds : undefined, "$.apiKeyPolicy.adminExpirySeconds");
+
+  const tcrIn = input.targetCredentialRotation ?? {};
+  if (!isNonArrayObject(tcrIn)) {
+    pushProblem(problems, "$.targetCredentialRotation", "must be an object when provided");
+  }
+  if (isNonArrayObject(tcrIn)) {
+    ensureNoUnknownKeys(tcrIn, new Set(["enabled", "strategy", "request", "response", "trigger"]), "$.targetCredentialRotation", problems);
+  }
+  const tcrEnabled = isNonArrayObject(tcrIn) && tcrIn.enabled !== undefined ? tcrIn.enabled : false;
+  if (typeof tcrEnabled !== "boolean") pushProblem(problems, "$.targetCredentialRotation.enabled", "must be a boolean");
+  const tcrStrategy = isNonArrayObject(tcrIn) && tcrIn.strategy !== undefined ? String(tcrIn.strategy) : "json_ttl";
+  if (!new Set(["json_ttl", "oauth_client_credentials"]).has(tcrStrategy)) {
+    pushProblem(problems, "$.targetCredentialRotation.strategy", "must be json_ttl or oauth_client_credentials");
+  }
+  const tcrRequest = isNonArrayObject(tcrIn) && tcrIn.request !== undefined ? tcrIn.request : DEFAULT_CONFIG_V1.targetCredentialRotation.request;
+  if (!isNonArrayObject(tcrRequest)) pushProblem(problems, "$.targetCredentialRotation.request", "must be an object");
+  const tcrResponseIn = isNonArrayObject(tcrIn) && tcrIn.response !== undefined ? tcrIn.response : {};
+  if (!isNonArrayObject(tcrResponseIn)) pushProblem(problems, "$.targetCredentialRotation.response", "must be an object");
+  const tcrKeyPath = isNonArrayObject(tcrResponseIn) && tcrResponseIn.key_path !== undefined ? String(tcrResponseIn.key_path || "") : "data.apiKey";
+  if (!tcrKeyPath.trim()) pushProblem(problems, "$.targetCredentialRotation.response.key_path", "must be a non-empty string");
+  const tcrTtlPathRaw = isNonArrayObject(tcrResponseIn) ? tcrResponseIn.ttl_path : undefined;
+  const tcrTtlPath = tcrTtlPathRaw === undefined || tcrTtlPathRaw === null ? null : String(tcrTtlPathRaw || "").trim();
+  const tcrExpiresAtPathRaw = isNonArrayObject(tcrResponseIn) ? tcrResponseIn.expires_at_path : undefined;
+  const tcrExpiresAtPath = tcrExpiresAtPathRaw === undefined || tcrExpiresAtPathRaw === null ? null : String(tcrExpiresAtPathRaw || "").trim();
+  if (!tcrTtlPath && !tcrExpiresAtPath) {
+    pushProblem(problems, "$.targetCredentialRotation.response", "must define ttl_path or expires_at_path");
+  }
+  const tcrTtlUnit = isNonArrayObject(tcrResponseIn) && tcrResponseIn.ttl_unit !== undefined ? String(tcrResponseIn.ttl_unit) : "seconds";
+  if (!new Set(["seconds", "minutes", "hours"]).has(tcrTtlUnit)) {
+    pushProblem(problems, "$.targetCredentialRotation.response.ttl_unit", "must be seconds, minutes, or hours");
+  }
+  const tcrTriggerIn = isNonArrayObject(tcrIn) && tcrIn.trigger !== undefined ? tcrIn.trigger : {};
+  if (!isNonArrayObject(tcrTriggerIn)) pushProblem(problems, "$.targetCredentialRotation.trigger", "must be an object");
+  const tcrSkew = isNonArrayObject(tcrTriggerIn) && tcrTriggerIn.refresh_skew_seconds !== undefined ? Number(tcrTriggerIn.refresh_skew_seconds) : 300;
+  if (!Number.isInteger(tcrSkew) || tcrSkew < 0) pushProblem(problems, "$.targetCredentialRotation.trigger.refresh_skew_seconds", "must be an integer >= 0");
+  const tcrRetry = isNonArrayObject(tcrTriggerIn) && tcrTriggerIn.retry_once_on_401 !== undefined ? tcrTriggerIn.retry_once_on_401 : true;
+  if (typeof tcrRetry !== "boolean") pushProblem(problems, "$.targetCredentialRotation.trigger.retry_once_on_401", "must be a boolean");
 
   const transformIn = input.transform ?? {};
   if (!isNonArrayObject(transformIn)) {
@@ -557,38 +719,15 @@ function validateAndNormalizeConfigV1(configInput) {
     pushProblem(problems, "$.debug", "must be an object when provided");
   }
   if (isNonArrayObject(debugIn)) {
-    ensureNoUnknownKeys(debugIn, new Set(["max_ttl_seconds", "redact_headers", "loggingEndpoint"]), "$.debug", problems);
+    ensureNoUnknownKeys(debugIn, new Set(["max_debug_session_seconds", "loggingEndpoint"]), "$.debug", problems);
   }
-  const maxTtlSecondsRaw = isNonArrayObject(debugIn) ? debugIn.max_ttl_seconds : undefined;
+  const maxTtlSecondsRaw = isNonArrayObject(debugIn) ? debugIn.max_debug_session_seconds : undefined;
   const maxTtlSeconds = maxTtlSecondsRaw === undefined ? 3600 : Number(maxTtlSecondsRaw);
   if (!Number.isInteger(maxTtlSeconds)) {
-    pushProblem(problems, "$.debug.max_ttl_seconds", "must be an integer");
+    pushProblem(problems, "$.debug.max_debug_session_seconds", "must be an integer");
   } else if (maxTtlSeconds < 1 || maxTtlSeconds > 604800) {
-    pushProblem(problems, "$.debug.max_ttl_seconds", "must be between 1 and 604800 (7 days)");
+    pushProblem(problems, "$.debug.max_debug_session_seconds", "must be between 1 and 604800 (7 days)");
   }
-  const redactHeadersIn =
-    isNonArrayObject(debugIn) && debugIn.redact_headers !== undefined
-      ? debugIn.redact_headers
-      : DEFAULT_CONFIG_V1.debug.redact_headers;
-  if (!Array.isArray(redactHeadersIn)) {
-    pushProblem(problems, "$.debug.redact_headers", "must be an array");
-  }
-  const redactHeaders = Array.isArray(redactHeadersIn)
-    ? redactHeadersIn
-        .map((name, index) => {
-          if (typeof name !== "string") {
-            pushProblem(problems, `$.debug.redact_headers[${index}]`, "must be a string");
-            return "";
-          }
-          const normalized = normalizeHeaderName(name);
-          if (!normalized) {
-            pushProblem(problems, `$.debug.redact_headers[${index}]`, "must be non-empty");
-            return "";
-          }
-          return normalized;
-        })
-        .filter(Boolean)
-    : [...DEFAULT_CONFIG_V1.debug.redact_headers];
   const loggingUrlIn = isNonArrayObject(debugIn) && debugIn.loggingEndpoint !== undefined ? debugIn.loggingEndpoint : {};
   if (!isNonArrayObject(loggingUrlIn)) {
     pushProblem(problems, "$.debug.loggingEndpoint", "must be an object when provided");
@@ -679,9 +818,28 @@ function validateAndNormalizeConfigV1(configInput) {
 
   return {
     targetHost,
+    apiKeyPolicy: {
+      proxyExpirySeconds,
+      issuerExpirySeconds,
+      adminExpirySeconds,
+    },
+    targetCredentialRotation: {
+      enabled: !!tcrEnabled,
+      strategy: tcrStrategy,
+      request: isNonArrayObject(tcrRequest) ? tcrRequest : DEFAULT_CONFIG_V1.targetCredentialRotation.request,
+      response: {
+        key_path: tcrKeyPath,
+        ttl_path: tcrTtlPath,
+        ttl_unit: tcrTtlUnit,
+        expires_at_path: tcrExpiresAtPath,
+      },
+      trigger: {
+        refresh_skew_seconds: Number.isInteger(tcrSkew) && tcrSkew >= 0 ? tcrSkew : 300,
+        retry_once_on_401: !!tcrRetry,
+      },
+    },
     debug: {
-      max_ttl_seconds: maxTtlSeconds,
-      redact_headers: [...new Set(redactHeaders)],
+      max_debug_session_seconds: maxTtlSeconds,
       loggingEndpoint: {
         url: sinkUrl,
         auth_header: sinkAuthHeader,
@@ -1430,59 +1588,127 @@ async function getAdminKey(env) {
   return env.CONFIG.get(KV_ADMIN_KEY);
 }
 
-async function getProxyKeyAuthState(env) {
+function keyKindConfig(kind) {
+  if (kind === "proxy") {
+    return {
+      current: KV_PROXY_KEY,
+      old: KV_PROXY_KEY_OLD,
+      oldExpiresAt: KV_PROXY_KEY_OLD_EXPIRES_AT,
+      primaryCreatedAt: KV_PROXY_PRIMARY_KEY_CREATED_AT,
+      secondaryCreatedAt: KV_PROXY_SECONDARY_KEY_CREATED_AT,
+      header: "X-Proxy-Key",
+      missingCode: "NOT_INITIALIZED",
+      missingMessage: `Proxy not initialized. Visit ${RESERVED_ROOT} first.`,
+      unauthorizedCode: "UNAUTHORIZED",
+      unauthorizedMessage: "Missing or invalid X-Proxy-Key",
+      policyKey: "proxyExpirySeconds",
+      responseKey: "proxy_key",
+    };
+  }
+  if (kind === "issuer") {
+    return {
+      current: KV_ISSUER_KEY,
+      old: KV_ISSUER_KEY_OLD,
+      oldExpiresAt: KV_ISSUER_KEY_OLD_EXPIRES_AT,
+      primaryCreatedAt: KV_ISSUER_PRIMARY_KEY_CREATED_AT,
+      secondaryCreatedAt: KV_ISSUER_SECONDARY_KEY_CREATED_AT,
+      header: "X-Issuer-Key",
+      missingCode: "ISSUER_NOT_CONFIGURED",
+      missingMessage: "Issuer key is not initialized.",
+      unauthorizedCode: "UNAUTHORIZED_ISSUER",
+      unauthorizedMessage: "Missing or invalid X-Issuer-Key",
+      policyKey: "issuerExpirySeconds",
+      responseKey: "issuer_key",
+    };
+  }
+  if (kind === "admin") {
+    return {
+      current: KV_ADMIN_KEY,
+      old: KV_ADMIN_KEY_OLD,
+      oldExpiresAt: KV_ADMIN_KEY_OLD_EXPIRES_AT,
+      primaryCreatedAt: KV_ADMIN_PRIMARY_KEY_CREATED_AT,
+      secondaryCreatedAt: KV_ADMIN_SECONDARY_KEY_CREATED_AT,
+      header: "X-Admin-Key",
+      missingCode: "ADMIN_NOT_CONFIGURED",
+      missingMessage: "Admin key is not initialized.",
+      unauthorizedCode: "UNAUTHORIZED_ADMIN",
+      unauthorizedMessage: "Missing or invalid X-Admin-Key",
+      policyKey: "adminExpirySeconds",
+      responseKey: "admin_key",
+    };
+  }
+  throw new HttpError(404, "INVALID_KEY_KIND", "Invalid key kind", {
+    expected: ["proxy", "issuer", "admin"],
+    received: kind,
+  });
+}
+
+async function getKeyAuthState(kind, env) {
+  const cfg = keyKindConfig(kind);
   ensureKvBinding(env);
-  const [current, old, oldExpiresAtRaw] = await Promise.all([
-    env.CONFIG.get(KV_PROXY_KEY),
-    env.CONFIG.get(KV_PROXY_KEY_OLD),
-    env.CONFIG.get(KV_PROXY_KEY_OLD_EXPIRES_AT),
+  const [current, old, oldExpiresAtRaw, primaryCreatedAtRaw, secondaryCreatedAtRaw] = await Promise.all([
+    env.CONFIG.get(cfg.current),
+    env.CONFIG.get(cfg.old),
+    env.CONFIG.get(cfg.oldExpiresAt),
+    env.CONFIG.get(cfg.primaryCreatedAt),
+    env.CONFIG.get(cfg.secondaryCreatedAt),
   ]);
   const oldExpiresAt = Number(oldExpiresAtRaw || 0);
-  return { current, old, oldExpiresAt };
+  const primaryCreatedAt = Number(primaryCreatedAtRaw || 0);
+  const secondaryCreatedAt = Number(secondaryCreatedAtRaw || 0);
+  return { cfg, current, old, oldExpiresAt, primaryCreatedAt, secondaryCreatedAt };
 }
 
 async function requireProxyKey(request, env) {
-  const { current, old, oldExpiresAt } = await getProxyKeyAuthState(env);
-  if (!current) {
-    throw new HttpError(503, "NOT_INITIALIZED", `Proxy not initialized. Visit ${RESERVED_ROOT} first.`);
-  }
-
-  const got = request.headers.get("X-Proxy-Key") || "";
-  if (got === current) return;
-
-  const now = Date.now();
-  const oldActive = !!old && Number.isFinite(oldExpiresAt) && oldExpiresAt > now;
-  if (oldActive && got === old) return;
-
-  if (!!old && Number.isFinite(oldExpiresAt) && oldExpiresAt <= now) {
-    // Lazy cleanup of expired overlap key.
-    await Promise.all([
-      env.CONFIG.delete(KV_PROXY_KEY_OLD),
-      env.CONFIG.delete(KV_PROXY_KEY_OLD_EXPIRES_AT),
-    ]);
-  }
-
-  if (old && Number.isFinite(oldExpiresAt) && oldExpiresAt > now) {
-    throw new HttpError(401, "UNAUTHORIZED", "Missing or invalid X-Proxy-Key (old key overlap is active)");
-  }
-  throw new HttpError(401, "UNAUTHORIZED", "Missing or invalid X-Proxy-Key");
+  await requireKeyKind(request, env, "proxy");
 }
 
 async function requireAdminKey(request, env) {
-  const expected = await getAdminKey(env);
-  if (!expected) {
-    throw new HttpError(
-      503,
-      "ADMIN_NOT_CONFIGURED",
-      "Admin key is not initialized.",
-      { setup: `Visit ${RESERVED_ROOT} to bootstrap keys.` }
-    );
+  await requireKeyKind(request, env, "admin");
+}
+
+async function requireIssuerKey(request, env) {
+  await requireKeyKind(request, env, "issuer");
+}
+
+async function requireKeyKind(request, env, kind) {
+  const { cfg, current, old, oldExpiresAt, primaryCreatedAt, secondaryCreatedAt } = await getKeyAuthState(kind, env);
+  if (!current) {
+    const details = kind === "admin" ? { setup: `Visit ${RESERVED_ROOT} to bootstrap keys.` } : null;
+    throw new HttpError(503, cfg.missingCode, cfg.missingMessage, details);
   }
 
-  const got = request.headers.get("X-Admin-Key") || "";
-  if (got !== expected) {
-    throw new HttpError(401, "UNAUTHORIZED_ADMIN", "Missing or invalid X-Admin-Key");
+  const got = request.headers.get(cfg.header) || "";
+
+  const cfgDoc = await loadConfigV1(env);
+  const expirySeconds = cfgDoc?.apiKeyPolicy?.[cfg.policyKey] ?? null;
+  const now = Date.now();
+  const primaryExpired =
+    expirySeconds !== null &&
+    Number.isFinite(primaryCreatedAt) &&
+    primaryCreatedAt > 0 &&
+    primaryCreatedAt + Number(expirySeconds) * 1000 <= now;
+  if (primaryExpired && got === current) {
+    throw new HttpError(401, cfg.unauthorizedCode, `${cfg.unauthorizedMessage} (primary key expired)`);
   }
+  if (got === current) return;
+
+  const oldActive = !!old && Number.isFinite(oldExpiresAt) && oldExpiresAt > now;
+  const secondaryExpired =
+    expirySeconds !== null &&
+    Number.isFinite(secondaryCreatedAt) &&
+    secondaryCreatedAt > 0 &&
+    secondaryCreatedAt + Number(expirySeconds) * 1000 <= now;
+  if (oldActive && !secondaryExpired && got === old) return;
+
+  if (!!old && Number.isFinite(oldExpiresAt) && oldExpiresAt <= now) {
+    await Promise.all([env.CONFIG.delete(cfg.old), env.CONFIG.delete(cfg.oldExpiresAt), env.CONFIG.delete(cfg.secondaryCreatedAt)]);
+  }
+
+  if (old && Number.isFinite(oldExpiresAt) && oldExpiresAt > now) {
+    throw new HttpError(401, cfg.unauthorizedCode, `${cfg.unauthorizedMessage} (old key overlap is active)`);
+  }
+  throw new HttpError(401, cfg.unauthorizedCode, cfg.unauthorizedMessage);
 }
 
 function getAdminAccessTokenFromRequest(request) {
@@ -1493,20 +1719,101 @@ function getAdminAccessTokenFromRequest(request) {
   return match ? match[1].trim() : "";
 }
 
-function adminAccessTokenKvKey(token) {
-  return `${KV_ADMIN_ACCESS_TOKEN_PREFIX}${token}`;
+function utf8ToBytes(str) {
+  return new TextEncoder().encode(String(str || ""));
+}
+
+function bytesToUtf8(bytes) {
+  return new TextDecoder().decode(bytes);
+}
+
+function bytesToBase64Url(bytes) {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlToBytes(str) {
+  const normalized = String(str || "").replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+  const binary = atob(padded);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+function safeJsonParse(text) {
+  try {
+    return JSON.parse(String(text || ""));
+  } catch {
+    return null;
+  }
+}
+
+function constantTimeEqualString(a, b) {
+  const x = String(a || "");
+  const y = String(b || "");
+  if (x.length !== y.length) return false;
+  let diff = 0;
+  for (let i = 0; i < x.length; i++) diff |= x.charCodeAt(i) ^ y.charCodeAt(i);
+  return diff === 0;
+}
+
+async function importHs256Key(secret) {
+  return crypto.subtle.importKey("raw", utf8ToBytes(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+}
+
+async function signJwtHs256(payloadObj, secret) {
+  const headerB64 = bytesToBase64Url(utf8ToBytes(JSON.stringify({ alg: "HS256", typ: "JWT" })));
+  const payloadB64 = bytesToBase64Url(utf8ToBytes(JSON.stringify(payloadObj)));
+  const input = `${headerB64}.${payloadB64}`;
+  const key = await importHs256Key(secret);
+  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, utf8ToBytes(input)));
+  const sigB64 = bytesToBase64Url(sig);
+  return `${input}.${sigB64}`;
+}
+
+async function verifyJwtHs256(token, secret) {
+  try {
+    const parts = String(token || "").split(".");
+    if (parts.length !== 3) return null;
+    const [h, p, s] = parts;
+    const header = safeJsonParse(bytesToUtf8(base64UrlToBytes(h)));
+    const payload = safeJsonParse(bytesToUtf8(base64UrlToBytes(p)));
+    if (!header || !payload || header.alg !== "HS256" || header.typ !== "JWT") return null;
+    const key = await importHs256Key(secret);
+    const input = `${h}.${p}`;
+    const expectedSig = new Uint8Array(await crypto.subtle.sign("HMAC", key, utf8ToBytes(input)));
+    const expectedSigB64 = bytesToBase64Url(expectedSig);
+    if (!constantTimeEqualString(expectedSigB64, s)) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+async function getAdminJwtSecret(env) {
+  const configured = String(env?.ADMIN_UI_JWT_SECRET || "").trim();
+  if (configured) return configured;
+  const adminKey = await getAdminKey(env);
+  if (!adminKey) {
+    throw new HttpError(503, "ADMIN_NOT_CONFIGURED", "Admin key is not initialized.", {
+      setup: `Visit ${RESERVED_ROOT} to bootstrap keys.`,
+    });
+  }
+  return adminKey;
 }
 
 async function validateAdminAccessToken(token, env) {
   if (!token) return false;
-  const raw = await env.CONFIG.get(adminAccessTokenKvKey(token));
-  if (!raw) return false;
-  const expiresAt = Number(raw);
-  const now = Date.now();
-  if (!Number.isFinite(expiresAt) || expiresAt <= now) {
-    await env.CONFIG.delete(adminAccessTokenKvKey(token));
-    return false;
-  }
+  const secret = await getAdminJwtSecret(env);
+  const payload = await verifyJwtHs256(token, secret);
+  if (!payload) return false;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const exp = Number(payload.exp || 0);
+  if (!Number.isFinite(exp) || exp <= nowSec) return false;
+  if (payload.aud !== "apiproxy-admin-ui") return false;
+  if (payload.iss !== "apiproxy") return false;
   return true;
 }
 
@@ -1515,16 +1822,26 @@ async function requireAdminAuth(request, env) {
   if (token) {
     const ok = await validateAdminAccessToken(token, env);
     if (ok) return;
-    throw new HttpError(401, "UNAUTHORIZED_ADMIN", "Missing, invalid, or expired X-Admin-Access-Token");
+    throw new HttpError(401, "UNAUTHORIZED_ADMIN", "Invalid or expired admin access token");
   }
   await requireAdminKey(request, env);
 }
 
 async function handleAdminAccessTokenPost(env) {
   const ttlSeconds = Math.max(60, getEnvInt(env, "ADMIN_ACCESS_TOKEN_TTL_SECONDS", DEFAULTS.ADMIN_ACCESS_TOKEN_TTL_SECONDS));
-  const token = generateSecret();
-  const expiresAtMs = Date.now() + ttlSeconds * 1000;
-  await env.CONFIG.put(adminAccessTokenKvKey(token), String(expiresAtMs));
+  const nowSec = Math.floor(Date.now() / 1000);
+  const expiresAtMs = (nowSec + ttlSeconds) * 1000;
+  const secret = await getAdminJwtSecret(env);
+  const token = await signJwtHs256(
+    {
+      iss: "apiproxy",
+      aud: "apiproxy-admin-ui",
+      iat: nowSec,
+      exp: nowSec + ttlSeconds,
+      scope: "admin_ui",
+    },
+    secret
+  );
   return jsonResponse(200, {
     ok: true,
     data: {
@@ -1642,74 +1959,15 @@ async function handleStatusPage(env, request) {
   if (!proxyInitialized || !adminInitialized) {
     return handleInitPage(env, request);
   }
-  const testingDocsUrl = getDocsSectionUrl(env, "testing-out-your-proxy");
-  const keyManagementDocsUrl = getDocsSectionUrl(env, "key-management");
+  const docsUrl = getDocsBaseUrl(env);
 
   return new Response(
     htmlPage(
       "API Transform Proxy",
-      `<p><b>Status:</b> 🟢 Running</p>
-       ${renderSecretField(
-         "Admin API Secret (To administer this proxy)",
-         "••••••••••••••••••••••••••••••••",
-         "admin-api-secret-status",
-         `API Key (Previously Created). This key cannot be viewed. See <a href="${escapeHtml(
-           keyManagementDocsUrl
-         )}" target="_blank" rel="noopener noreferrer">Rotating keys</a> to generate new keys.`,
-         false
-       )}
-       ${renderSecretField(
-         "Requestor API Secret (To call endpoints through this proxy)",
-         "••••••••••••••••••••••••••••••••",
-         "proxy-api-secret-status",
-         `API Key (Previously Created). This key cannot be viewed. See <a href="${escapeHtml(
-           keyManagementDocsUrl
-         )}" target="_blank" rel="noopener noreferrer">Rotating keys</a> to generate new keys.`,
-         false
-       )}
-       <p><b>How to reset keys</b><br />
-       <a href="${escapeHtml(keyManagementDocsUrl)}" target="_blank" rel="noopener noreferrer">Rotating keys</a></p>
-       <p><b>How to test</b><br />
-       <a href="${escapeHtml(testingDocsUrl)}" target="_blank" rel="noopener noreferrer">Testing out your proxy</a></p>
-       <hr style="margin:16px 0;border:none;border-top:1px solid #e5e7eb;" />
-       <p><b>Step 2: Login to Admin Console</b></p>
-       <p>Paste your Admin API key and click Login to continue.</p>
-       <input id="init-admin-key" type="password" placeholder="paste X-Admin-Key"
-         style="width:100%;max-width:560px;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;" />
-       <div style="margin-top:8px;">
-         <button type="button" onclick="initAdminLogin()"
-           style="padding:8px 12px;border:1px solid #0f172a;border-radius:8px;background:#111827;color:#fff;cursor:pointer;">Login</button>
-       </div>
-       <div id="init-admin-login-msg" style="margin-top:8px;color:#991b1b;"></div>
-       ${renderSecretFieldScript()}
-       <script>
-         async function initAdminLogin() {
-           const input = document.getElementById('init-admin-key');
-           const msg = document.getElementById('init-admin-login-msg');
-           const key = (input && input.value || '').trim();
-           if (!key) {
-             if (msg) msg.textContent = 'Enter your Admin API key first.';
-             return;
-           }
-           try {
-             const res = await fetch('${ADMIN_ROOT}/access-token', {
-               method: 'POST',
-               headers: { 'X-Admin-Key': key },
-             });
-             const text = await res.text();
-             let payload = null;
-             try { payload = JSON.parse(text); } catch {}
-             if (!res.ok || !payload?.data?.access_token) {
-               if (msg) msg.textContent = 'Login failed. Check your admin key and try again.';
-               return;
-             }
-             try { sessionStorage.setItem('apiproxy_admin_access_token_v1', payload.data.access_token); } catch {}
-             window.location.href = '${ADMIN_ROOT}';
-           } catch {
-             if (msg) msg.textContent = 'Login failed. Try again.';
-           }
-         }
-       </script>`
+      `${renderOnboardingHeader()}
+       <h2 style="margin:0 0 10px 0;">Step 2 - View/Configure This Proxy</h2>
+       ${renderAdminLoginOptions(docsUrl)}
+       ${renderInitAdminLoginScript(ADMIN_ROOT)}`
     ),
     { headers: { "content-type": "text/html; charset=utf-8" } }
   );
@@ -1731,40 +1989,55 @@ function parseMs(raw) {
 
 async function handleKeysStatusGet(env) {
   const now = Date.now();
-  const [proxyKey, proxyKeyOld, proxyOldExpiresAtRaw, proxyRotatedAtRaw, adminKey, adminRotatedAtRaw] = await Promise.all([
-    env.CONFIG.get(KV_PROXY_KEY),
-    env.CONFIG.get(KV_PROXY_KEY_OLD),
-    env.CONFIG.get(KV_PROXY_KEY_OLD_EXPIRES_AT),
-    env.CONFIG.get(KV_PROXY_KEY_ROTATED_AT),
-    env.CONFIG.get(KV_ADMIN_KEY),
-    env.CONFIG.get(KV_ADMIN_KEY_ROTATED_AT),
+  const [proxyState, issuerState, adminState, config] = await Promise.all([
+    getKeyAuthState("proxy", env),
+    getKeyAuthState("issuer", env),
+    getKeyAuthState("admin", env),
+    loadConfigV1(env),
   ]);
-  const proxyOldExpiresAt = parseMs(proxyOldExpiresAtRaw);
-  const proxyOldActive = !!proxyKeyOld && proxyOldExpiresAt > now;
-  let proxyRotatedAt = parseMs(proxyRotatedAtRaw);
-  let adminRotatedAt = parseMs(adminRotatedAtRaw);
-  if (proxyKey && !proxyRotatedAt) {
-    proxyRotatedAt = now;
-    await env.CONFIG.put(KV_PROXY_KEY_ROTATED_AT, String(proxyRotatedAt));
+
+  const cleanup = [];
+  function normalize(kind, state) {
+    let primaryCreatedAt = parseMs(state.primaryCreatedAt);
+    let secondaryCreatedAt = parseMs(state.secondaryCreatedAt);
+    const oldExpiresAt = parseMs(state.oldExpiresAt);
+    const secondaryActive = !!state.old && oldExpiresAt > now;
+    if (state.current && !primaryCreatedAt) {
+      primaryCreatedAt = now;
+      cleanup.push(env.CONFIG.put(state.cfg.primaryCreatedAt, String(primaryCreatedAt)));
+    }
+    if (!state.old) {
+      secondaryCreatedAt = 0;
+    } else if (!secondaryCreatedAt) {
+      secondaryCreatedAt = now;
+      cleanup.push(env.CONFIG.put(state.cfg.secondaryCreatedAt, String(secondaryCreatedAt)));
+    }
+    if (state.old && oldExpiresAt <= now) {
+      cleanup.push(env.CONFIG.delete(state.cfg.old), env.CONFIG.delete(state.cfg.oldExpiresAt), env.CONFIG.delete(state.cfg.secondaryCreatedAt));
+      secondaryCreatedAt = 0;
+    }
+    const expirySeconds = config?.apiKeyPolicy?.[keyKindConfig(kind).policyKey] ?? null;
+    return {
+      primary_active: !!state.current,
+      secondary_active: secondaryActive,
+      [`${kind}_primary_key_created_at`]: primaryCreatedAt || 0,
+      [`${kind}_secondary_key_created_at`]: secondaryActive ? secondaryCreatedAt || 0 : 0,
+      expiry_seconds: expirySeconds,
+    };
   }
-  if (adminKey && !adminRotatedAt) {
-    adminRotatedAt = now;
-    await env.CONFIG.put(KV_ADMIN_KEY_ROTATED_AT, String(adminRotatedAt));
-  }
+
+  const proxyData = normalize("proxy", proxyState);
+  const issuerData = normalize("issuer", issuerState);
+  const adminData = normalize("admin", adminState);
+
+  if (cleanup.length > 0) await Promise.all(cleanup);
 
   return jsonResponse(200, {
     ok: true,
     data: {
-      proxy: {
-        primary_active: !!proxyKey,
-        secondary_active: proxyOldActive,
-        secondary_expires_at_ms: proxyOldActive ? proxyOldExpiresAt : 0,
-        last_rotated_at_ms: proxyRotatedAt,
-      },
-      admin: {
-        primary_active: !!adminKey,
-        last_rotated_at_ms: adminRotatedAt,
-      },
+      proxy: proxyData,
+      issuer: issuerData,
+      admin: adminData,
     },
     meta: {},
   });
@@ -1887,6 +2160,99 @@ async function handleConfigTestRule(request, env) {
   });
 }
 
+async function handleKeyRotationConfigGet(env) {
+  const config = await loadConfigV1(env);
+  const section = config?.targetCredentialRotation || DEFAULT_CONFIG_V1.targetCredentialRotation;
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      enabled: !!section.enabled,
+      strategy: String(section.strategy || "json_ttl"),
+      request_yaml: await stringifyYamlConfig(section.request || {}),
+      key_path: String(section?.response?.key_path || ""),
+      ttl_path: section?.response?.ttl_path ?? null,
+      ttl_unit: String(section?.response?.ttl_unit || "seconds"),
+      expires_at_path: section?.response?.expires_at_path ?? null,
+      refresh_skew_seconds: Number(section?.trigger?.refresh_skew_seconds ?? 300),
+      retry_once_on_401: !!section?.trigger?.retry_once_on_401,
+      proxy_expiry_seconds: config?.apiKeyPolicy?.proxyExpirySeconds ?? null,
+      issuer_expiry_seconds: config?.apiKeyPolicy?.issuerExpirySeconds ?? null,
+      admin_expiry_seconds: config?.apiKeyPolicy?.adminExpirySeconds ?? null,
+    },
+    meta: {},
+  });
+}
+
+async function handleKeyRotationConfigPut(request, env) {
+  enforceInvokeContentType(request);
+  const body = await readJsonWithLimit(request, getEnvInt(env, "MAX_REQ_BYTES", DEFAULTS.MAX_REQ_BYTES));
+  const existing = await loadConfigV1(env);
+
+  const requestYaml = String(body?.request_yaml || "").trim();
+  if (!requestYaml) {
+    throw new HttpError(400, "INVALID_REQUEST", "request_yaml is required", {
+      expected: { request_yaml: "method: POST\\nurl: https://..." },
+    });
+  }
+
+  let requestObj;
+  try {
+    const yaml = await loadYamlApi();
+    requestObj = yaml.parse(requestYaml);
+  } catch (e) {
+    throw new HttpError(400, "INVALID_REQUEST", "request_yaml could not be parsed", {
+      cause: String(e?.message || e),
+    });
+  }
+  if (!isNonArrayObject(requestObj)) {
+    throw new HttpError(400, "INVALID_REQUEST", "request_yaml must parse to an object");
+  }
+
+  function toNullableInt(raw, field) {
+    if (raw === null || raw === undefined || raw === "") return null;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 1) {
+      throw new HttpError(400, "INVALID_REQUEST", `${field} must be a positive integer or null`);
+    }
+    return n;
+  }
+
+  const next = {
+    ...existing,
+    apiKeyPolicy: {
+      proxyExpirySeconds: toNullableInt(body?.proxy_expiry_seconds, "proxy_expiry_seconds"),
+      issuerExpirySeconds: toNullableInt(body?.issuer_expiry_seconds, "issuer_expiry_seconds"),
+      adminExpirySeconds: toNullableInt(body?.admin_expiry_seconds, "admin_expiry_seconds"),
+    },
+    targetCredentialRotation: {
+      enabled: !!body?.enabled,
+      strategy: body?.strategy === "oauth_client_credentials" ? "oauth_client_credentials" : "json_ttl",
+      request: requestObj,
+      response: {
+        key_path: String(body?.key_path || ""),
+        ttl_path: body?.ttl_path === "" ? null : body?.ttl_path ?? null,
+        ttl_unit: String(body?.ttl_unit || "seconds"),
+        expires_at_path: body?.expires_at_path === "" ? null : body?.expires_at_path ?? null,
+      },
+      trigger: {
+        refresh_skew_seconds: Number(body?.refresh_skew_seconds ?? 300),
+        retry_once_on_401: !!body?.retry_once_on_401,
+      },
+    },
+  };
+
+  const normalized = await saveConfigObjectV1(next, env);
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      message: "Key rotation configuration updated",
+      key_rotation: normalized.targetCredentialRotation,
+      api_key_policy: normalized.apiKeyPolicy,
+    },
+    meta: {},
+  });
+}
+
 async function readDebugEnabledUntilMs(env) {
   ensureKvBinding(env);
   const raw = await env.CONFIG.get(KV_DEBUG_ENABLED_UNTIL_MS);
@@ -1907,18 +2273,7 @@ function redactDebugValue(value) {
 }
 
 function getDebugRedactHeaderSet(config) {
-  const builtIn = [
-    "authorization",
-    "proxy-authorization",
-    "cookie",
-    "set-cookie",
-    "x-proxy-key",
-    "x-admin-key",
-  ];
-  const custom = Array.isArray(config?.debug?.redact_headers)
-    ? config.debug.redact_headers.map((h) => normalizeHeaderName(h)).filter(Boolean)
-    : [];
-  return new Set([...builtIn, ...custom]);
+  return new Set(BUILTIN_DEBUG_REDACT_HEADERS);
 }
 
 function toRedactedHeaderMap(headersLike, redactedHeadersSet = null) {
@@ -2134,6 +2489,7 @@ function handleAdminPage() {
          <div id="admin-nav" style="display:flex;flex-direction:column;gap:8px;min-width:220px;">
            <button type="button" class="tab-btn" data-tab="overview">Status</button>
            <button type="button" class="tab-btn" data-tab="config">Config</button>
+           <button type="button" class="tab-btn" data-tab="key-rotation">Key Rotation</button>
            <button type="button" class="tab-btn" data-tab="debug">Logging</button>
            <button type="button" class="tab-btn" data-tab="headers">Enrichments</button>
            <button type="button" class="tab-btn" data-tab="keys">API Access Keys</button>
@@ -2146,11 +2502,6 @@ function handleAdminPage() {
          </div>
          <div id="tab-debug" class="tab-panel" style="display:none;">
            <p><b>Logging controls</b></p>
-           <div id="logging-status" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin-bottom:10px;">Loading logging status...</div>
-           <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
-             <button type="button" id="debug-enable-btn">Enable debug</button>
-             <button type="button" id="debug-disable-btn">Disable debug</button>
-           </div>
            <p style="margin-top:16px;"><b>Logging configuration (read-only)</b></p>
            <label for="logging-config-url" style="display:block;margin:8px 0 4px;">Logging Endpoint URL (from YAML config)</label>
            <input id="logging-config-url" type="text" readonly
@@ -2158,8 +2509,13 @@ function handleAdminPage() {
            <label for="logging-config-auth-header" style="display:block;margin:2px 0 4px;">Logging Auth Header (from YAML config)</label>
            <input id="logging-config-auth-header" type="text" readonly
              style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;margin-bottom:8px;" />
-           <p style="font-size:13px;color:#475569;margin:6px 0 0 0;">To modify logging URL/header, update YAML config under <code>debug.loggingEndpoint</code>.</p>
+           <p style="font-size:13px;color:#475569;margin:6px 0 0 0;">To modify logging URL/header, update YAML config under <code>debug.loggingEndpoint</code>. <a href="#" id="logging-open-config-link">Open Config</a></p>
            <p style="font-size:13px;color:#475569;margin:4px 0 0 0;">Logging secrets are managed via this API only and are not stored in YAML.</p>
+           <div id="logging-status" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin:10px 0;">Loading logging status...</div>
+           <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+             <button type="button" id="debug-enable-btn">Enable debug</button>
+             <button type="button" id="debug-disable-btn">Disable debug</button>
+           </div>
            <pre id="logging-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Logging output appears here.</pre>
            <p style="margin-top:10px;"><a href="#" id="debug-refresh-trace-link">Refresh last trace</a></p>
            <pre id="debug-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;">Debug output appears here.</pre>
@@ -2168,7 +2524,7 @@ function handleAdminPage() {
            <input id="logging-secret" type="password" placeholder="set logging auth secret"
              style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-             <button type="button" id="logging-secret-save-btn">Save secret</button>
+             <button type="button" id="logging-secret-save-btn">Save/Update secret</button>
              <button type="button" id="logging-secret-delete-btn">Delete secret</button>
            </div>
          </div>
@@ -2187,12 +2543,73 @@ function handleAdminPage() {
              style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">{"sample":{"status":500,"headers":{"content-type":"application/json"},"type":"json","body":{"error":"bad"}}}</textarea>
            <pre id="config-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Config output appears here.</pre>
          </div>
+         <div id="tab-key-rotation" class="tab-panel" style="display:none;">
+           <p><b>Key rotation configuration</b></p>
+           <label for="kr-enabled" style="display:block;margin:8px 0 4px;">Enabled</label>
+           <input id="kr-enabled" type="checkbox" />
+
+           <label for="kr-strategy" style="display:block;margin:10px 0 4px;">Strategy</label>
+           <select id="kr-strategy" style="width:100%;max-width:420px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;">
+             <option value="json_ttl">json_ttl</option>
+             <option value="oauth_client_credentials">oauth_client_credentials</option>
+           </select>
+
+           <label for="kr-request-yaml" style="display:block;margin:10px 0 4px;">Request (YAML object)</label>
+           <textarea id="kr-request-yaml" rows="12"
+             style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"></textarea>
+
+           <label for="kr-key-path" style="display:block;margin:10px 0 4px;">Response Key Path</label>
+           <input id="kr-key-path" type="text" placeholder="data.apiKey"
+             style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+
+           <label for="kr-ttl-path" style="display:block;margin:10px 0 4px;">Response TTL Path</label>
+           <input id="kr-ttl-path" type="text" placeholder="data.ttl"
+             style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+
+           <label for="kr-ttl-unit" style="display:block;margin:10px 0 4px;">TTL Unit</label>
+           <select id="kr-ttl-unit" style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;">
+             <option value="seconds">seconds</option>
+             <option value="minutes">minutes</option>
+             <option value="hours">hours</option>
+           </select>
+
+           <label for="kr-expires-at-path" style="display:block;margin:10px 0 4px;">Response Expires-At Path</label>
+           <input id="kr-expires-at-path" type="text" placeholder="data.expiresAt (optional)"
+             style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+
+           <label for="kr-refresh-skew" style="display:block;margin:10px 0 4px;">Refresh Skew Seconds</label>
+           <input id="kr-refresh-skew" type="number" min="0" step="1"
+             style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+
+           <label for="kr-retry-on-401" style="display:block;margin:10px 0 4px;">Retry Once On 401</label>
+           <input id="kr-retry-on-401" type="checkbox" />
+
+           <label for="kr-proxy-expiry" style="display:block;margin:10px 0 4px;">Proxy Key Expiry Seconds</label>
+           <input id="kr-proxy-expiry" type="text" placeholder="null or integer"
+             style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+
+           <label for="kr-issuer-expiry" style="display:block;margin:10px 0 4px;">Issuer Key Expiry Seconds</label>
+           <input id="kr-issuer-expiry" type="text" placeholder="null or integer"
+             style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+
+           <label for="kr-admin-expiry" style="display:block;margin:10px 0 4px;">Admin Key Expiry Seconds</label>
+           <input id="kr-admin-expiry" type="text" placeholder="null or integer"
+             style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+
+           <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap;">
+             <button type="button" id="kr-save-btn">Save key rotation config</button>
+             <button type="button" id="kr-reload-btn">Reload key rotation config</button>
+           </div>
+           <pre id="kr-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Key rotation output appears here.</pre>
+         </div>
          <div id="tab-headers" class="tab-panel" style="display:none;">
            <p><b>Enrichments</b></p>
+           <label for="header-name" style="display:block;margin:8px 0 4px;">Header Key</label>
            <input id="header-name" type="text" placeholder="authorization"
              style="width:100%;max-width:460px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
+           <label for="header-value" style="display:block;margin:2px 0 4px;">Header Value/Secret</label>
            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-             <input id="header-value" type="password" placeholder="header secret value"
+             <input id="header-value" type="password" placeholder="header value/secret"
                style="width:100%;max-width:360px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
              <a href="#" id="header-value-toggle-btn" style="margin-bottom:8px;font-size:12px;text-decoration:underline;">show</a>
            </div>
@@ -2208,6 +2625,7 @@ function handleAdminPage() {
            <div style="display:flex;gap:8px;flex-wrap:wrap;">
              <button type="button" id="keys-refresh-btn">Refresh key status</button>
              <button type="button" id="rotate-proxy-btn">Rotate proxy key</button>
+             <button type="button" id="rotate-issuer-btn">Rotate issuer key</button>
              <button type="button" id="rotate-admin-btn">Rotate admin key</button>
            </div>
            <pre id="keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Rotation output appears here.</pre>
@@ -2227,14 +2645,34 @@ function handleAdminPage() {
          const ADMIN_ROOT = '${ADMIN_ROOT}';
          const ADMIN_ACCESS_TOKEN_STORAGE = 'apiproxy_admin_access_token_v1';
          const DEFAULT_CONFIG_YAML_TEMPLATE = \`targetHost: null
+apiKeyPolicy:
+  proxyExpirySeconds: null
+  issuerExpirySeconds: null
+  adminExpirySeconds: null
+targetCredentialRotation:
+  enabled: false
+  strategy: json_ttl
+  request:
+    method: POST
+    url: ""
+    headers: {}
+    body:
+      type: json
+      value: {}
+  response:
+    key_path: data.apiKey
+    ttl_path: data.ttl
+    ttl_unit: seconds
+    expires_at_path: null
+  trigger:
+    refresh_skew_seconds: 300
+    retry_once_on_401: true
 debug:
-  redact_headers:
-    - authorization
-    - proxy-authorization
-    - cookie
-    - set-cookie
-    - x-proxy-key
-    - x-admin-key
+  max_debug_session_seconds: 3600
+  loggingEndpoint:
+    url: null
+    auth_header: null
+    auth_value: null
 transform:
   enabled: true
   defaultExpr: ""
@@ -2255,8 +2693,8 @@ header_forwarding:
     - content-length
     - x-proxy-key
     - x-admin-key
+    - x-issuer-key
     - x-proxy-host
-    - xproxyhost
 \`;
          let currentKey = '';
          let pendingDeleteHeaderName = '';
@@ -2369,7 +2807,7 @@ header_forwarding:
            if (!currentKey) {
              throw new Error('Login first.');
             }
-           const headers = { 'X-Admin-Access-Token': currentKey };
+           const headers = { 'Authorization': 'Bearer ' + currentKey };
            if (body !== undefined && !expectText) headers['Content-Type'] = 'application/json';
            if (expectText) headers['Accept'] = 'text/plain';
            const res = await fetch(path, {
@@ -2403,6 +2841,7 @@ header_forwarding:
                debugLoadTrace();
                loadLoggingStatus();
              }
+             if (name === 'key-rotation') keyRotationLoad();
              if (name === 'headers') headersList();
              if (name === 'keys') keysRefresh();
            }
@@ -2420,32 +2859,38 @@ header_forwarding:
            });
            setActiveTab('overview');
          }
-         function formatMs(ms) {
-           const n = Number(ms || 0);
-           if (!n) return 'n/a';
-           try { return new Date(n).toLocaleString(); } catch { return 'n/a'; }
-         }
-         function formatOverviewStatus(version, debug, headers) {
+         function formatOverviewStatus(version, debug, headers, targetHost) {
            const versionText = version?.data?.version || 'unknown';
            const debugData = debug?.data || {};
            const debugEnabled = !!debugData.enabled;
-           const ttlRemaining = Number(debugData.ttl_remaining_seconds || 0);
            const enrichedHeaders = Array.isArray(headers?.enriched_headers)
              ? headers.enriched_headers
              : (Array.isArray(headers?.data?.enriched_headers) ? headers.data.enriched_headers : []);
            return '<div><b>Build Version:</b> ' + versionText + '</div>'
              + '<div><b>Debug Enabled:</b> ' + (debugEnabled ? 'yes' : 'no') + '</div>'
-             + '<div><b>Debug TTL Remaining (seconds):</b> ' + ttlRemaining + '</div>'
+             + '<div><b>Target URL:</b> ' + (targetHost || '(not set)') + '</div>'
              + '<div><b>Enrichments:</b> ' + (enrichedHeaders.length ? enrichedHeaders.join(', ') : '(none)') + '</div>';
          }
          async function refreshOverview() {
            try {
-             const [version, debug, headers] = await Promise.all([
+             const [version, debug, headers, yamlText] = await Promise.all([
                apiCall(ADMIN_ROOT + '/version', 'GET'),
                apiCall(ADMIN_ROOT + '/debug', 'GET'),
                apiCall(ADMIN_ROOT + '/headers', 'GET'),
+               apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true),
              ]);
-             setHtml('overview-output', formatOverviewStatus(version, debug, headers));
+             let targetHost = '';
+             try {
+               const res = await fetch(ADMIN_ROOT + '/config/validate', {
+                 method: 'POST',
+                 headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'text/yaml' },
+                 body: yamlText,
+               });
+               const txt = await res.text();
+               const parsed = JSON.parse(txt);
+               if (res.ok) targetHost = parsed?.data?.config?.targetHost || '';
+             } catch {}
+             setHtml('overview-output', formatOverviewStatus(version, debug, headers, targetHost));
            } catch (e) {
              setOutput('overview-output', String(e.message || e));
            }
@@ -2496,7 +2941,7 @@ header_forwarding:
              try {
                const res = await fetch(ADMIN_ROOT + '/config/validate', {
                  method: 'POST',
-                 headers: { 'X-Admin-Access-Token': currentKey, 'Content-Type': 'text/yaml' },
+                 headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'text/yaml' },
                  body: yamlText,
                });
                const txt = await res.text();
@@ -2537,7 +2982,7 @@ header_forwarding:
            try {
              const res = await fetch(ADMIN_ROOT + '/config/validate', {
                method: 'POST',
-               headers: { 'X-Admin-Access-Token': currentKey, 'Content-Type': 'text/yaml' },
+               headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'text/yaml' },
                body: yaml,
              });
              if (res.status === 401) {
@@ -2580,7 +3025,7 @@ header_forwarding:
            try {
              const res = await fetch(ADMIN_ROOT + '/config', {
                method: 'PUT',
-               headers: { 'X-Admin-Access-Token': currentKey, 'Content-Type': 'text/yaml' },
+               headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'text/yaml' },
                body: yaml,
              });
              if (res.status === 401) {
@@ -2611,6 +3056,56 @@ header_forwarding:
              setOutput('config-output', formatConfigSummary('Rule test result', result));
            } catch (e) {
              setOutput('config-output', String(e.message || e));
+           }
+         }
+         function normalizeNullableIntegerInput(raw) {
+           const v = String(raw == null ? '' : raw).trim();
+           if (!v || v.toLowerCase() === 'null') return null;
+           const n = Number(v);
+           if (!Number.isInteger(n) || n < 1) throw new Error('Expiry fields must be null or positive integers.');
+           return n;
+         }
+         async function keyRotationLoad() {
+           try {
+             const payload = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'GET');
+             const d = payload?.data || {};
+             if (el('kr-enabled')) el('kr-enabled').checked = !!d.enabled;
+             if (el('kr-strategy')) el('kr-strategy').value = d.strategy || 'json_ttl';
+             if (el('kr-request-yaml')) el('kr-request-yaml').value = String(d.request_yaml || '');
+             if (el('kr-key-path')) el('kr-key-path').value = String(d.key_path || '');
+             if (el('kr-ttl-path')) el('kr-ttl-path').value = d.ttl_path == null ? '' : String(d.ttl_path);
+             if (el('kr-ttl-unit')) el('kr-ttl-unit').value = d.ttl_unit || 'seconds';
+             if (el('kr-expires-at-path')) el('kr-expires-at-path').value = d.expires_at_path == null ? '' : String(d.expires_at_path);
+             if (el('kr-refresh-skew')) el('kr-refresh-skew').value = String(Number(d.refresh_skew_seconds || 0));
+             if (el('kr-retry-on-401')) el('kr-retry-on-401').checked = !!d.retry_once_on_401;
+             if (el('kr-proxy-expiry')) el('kr-proxy-expiry').value = d.proxy_expiry_seconds == null ? 'null' : String(d.proxy_expiry_seconds);
+             if (el('kr-issuer-expiry')) el('kr-issuer-expiry').value = d.issuer_expiry_seconds == null ? 'null' : String(d.issuer_expiry_seconds);
+             if (el('kr-admin-expiry')) el('kr-admin-expiry').value = d.admin_expiry_seconds == null ? 'null' : String(d.admin_expiry_seconds);
+             setOutput('kr-output', 'Key rotation config loaded.');
+           } catch (e) {
+             setOutput('kr-output', String(e.message || e));
+           }
+         }
+         async function keyRotationSave() {
+           try {
+             const payload = {
+               enabled: !!el('kr-enabled')?.checked,
+               strategy: (el('kr-strategy')?.value || 'json_ttl'),
+               request_yaml: el('kr-request-yaml')?.value || '',
+               key_path: el('kr-key-path')?.value || '',
+               ttl_path: el('kr-ttl-path')?.value || null,
+               ttl_unit: el('kr-ttl-unit')?.value || 'seconds',
+               expires_at_path: el('kr-expires-at-path')?.value || null,
+               refresh_skew_seconds: Number(el('kr-refresh-skew')?.value || 0),
+               retry_once_on_401: !!el('kr-retry-on-401')?.checked,
+               proxy_expiry_seconds: normalizeNullableIntegerInput(el('kr-proxy-expiry')?.value),
+               issuer_expiry_seconds: normalizeNullableIntegerInput(el('kr-issuer-expiry')?.value),
+               admin_expiry_seconds: normalizeNullableIntegerInput(el('kr-admin-expiry')?.value),
+             };
+             const out = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'PUT', payload);
+             setOutput('kr-output', out);
+           } catch (e) {
+             setOutput('kr-output', String(e.message || e));
            }
          }
          async function headersList() {
@@ -2682,21 +3177,38 @@ header_forwarding:
            field.type = hidden ? 'text' : 'password';
            btn.textContent = hidden ? 'hide' : 'show';
          }
-         async function keysRefresh() {
+        async function keysRefresh() {
            try {
              const payload = await apiCall(ADMIN_ROOT + '/keys', 'GET');
              const proxy = payload?.data?.proxy || {};
+             const issuer = payload?.data?.issuer || {};
              const admin = payload?.data?.admin || {};
+             const formatCreatedAt = (ms) => {
+               const n = Number(ms || 0);
+               if (!n) return 'n/a';
+               try { return new Date(n).toLocaleString(); } catch { return 'n/a'; }
+             };
              const html =
                '<div><b>Proxy key</b></div>'
                + '<div>Primary: ' + (proxy.primary_active ? 'active' : 'missing') + '</div>'
+               + '<div>Primary created: ' + formatCreatedAt(proxy.proxy_primary_key_created_at) + '</div>'
                + '<div>Secondary overlap key: ' + (proxy.secondary_active ? 'active' : 'inactive') + '</div>'
-               + '<div>Secondary expiry: ' + formatMs(proxy.secondary_expires_at_ms) + '</div>'
-               + '<div>Last rotated: ' + formatMs(proxy.last_rotated_at_ms) + '</div>'
+               + '<div>Secondary created: ' + formatCreatedAt(proxy.proxy_secondary_key_created_at) + '</div>'
+               + '<div>Expiry policy: ' + (proxy.expiry_seconds === null ? 'null (long-lived)' : String(proxy.expiry_seconds) + 's') + '</div>'
+               + '<hr style="margin:10px 0;border:none;border-top:1px solid #eee;" />'
+               + '<div><b>Issuer key</b></div>'
+               + '<div>Primary: ' + (issuer.primary_active ? 'active' : 'missing') + '</div>'
+               + '<div>Primary created: ' + formatCreatedAt(issuer.issuer_primary_key_created_at) + '</div>'
+               + '<div>Secondary overlap key: ' + (issuer.secondary_active ? 'active' : 'inactive') + '</div>'
+               + '<div>Secondary created: ' + formatCreatedAt(issuer.issuer_secondary_key_created_at) + '</div>'
+               + '<div>Expiry policy: ' + (issuer.expiry_seconds === null ? 'null (long-lived)' : String(issuer.expiry_seconds) + 's') + '</div>'
                + '<hr style="margin:10px 0;border:none;border-top:1px solid #eee;" />'
                + '<div><b>Admin key</b></div>'
                + '<div>Primary: ' + (admin.primary_active ? 'active' : 'missing') + '</div>'
-               + '<div>Last rotated: ' + formatMs(admin.last_rotated_at_ms) + '</div>';
+               + '<div>Primary created: ' + formatCreatedAt(admin.admin_primary_key_created_at) + '</div>'
+               + '<div>Secondary overlap key: ' + (admin.secondary_active ? 'active' : 'inactive') + '</div>'
+               + '<div>Secondary created: ' + formatCreatedAt(admin.admin_secondary_key_created_at) + '</div>'
+               + '<div>Expiry policy: ' + (admin.expiry_seconds === null ? 'null (long-lived)' : String(admin.expiry_seconds) + 's') + '</div>';
              setHtml('keys-status', html);
            } catch (e) {
              setOutput('keys-output', String(e.message || e));
@@ -2704,14 +3216,21 @@ header_forwarding:
          }
          async function rotateProxy() {
            try {
-             setOutput('keys-output', await apiCall(ADMIN_ROOT + '/rotate', 'POST'));
+             setOutput('keys-output', await apiCall(ADMIN_ROOT + '/keys/proxy/rotate', 'POST'));
+             await keysRefresh();
+           }
+           catch (e) { setOutput('keys-output', String(e.message || e)); }
+         }
+         async function rotateIssuer() {
+           try {
+             setOutput('keys-output', await apiCall(ADMIN_ROOT + '/keys/issuer/rotate', 'POST'));
              await keysRefresh();
            }
            catch (e) { setOutput('keys-output', String(e.message || e)); }
          }
          async function rotateAdmin() {
            try {
-             const out = await apiCall(ADMIN_ROOT + '/rotate-admin', 'POST');
+             const out = await apiCall(ADMIN_ROOT + '/keys/admin/rotate', 'POST');
              setOutput('keys-output', out);
              await keysRefresh();
              setCurrentKey('');
@@ -2751,6 +3270,7 @@ header_forwarding:
                  await debugLoadTrace();
                  await loadLoggingStatus();
                  await configLoad();
+                 await keyRotationLoad();
                  await headersList();
                  await keysRefresh();
                } catch {
@@ -2765,6 +3285,10 @@ header_forwarding:
              evt.preventDefault();
              debugLoadTrace();
            });
+           el('logging-open-config-link')?.addEventListener('click', (evt) => {
+             evt.preventDefault();
+             document.querySelector('.tab-btn[data-tab="config"]')?.click();
+           });
            el('debug-enable-btn')?.addEventListener('click', debugEnable);
            el('debug-disable-btn')?.addEventListener('click', debugDisable);
            el('logging-secret-save-btn')?.addEventListener('click', loggingSecretSave);
@@ -2778,6 +3302,8 @@ header_forwarding:
              configTestRule();
            });
            el('config-save-btn')?.addEventListener('click', configSave);
+           el('kr-save-btn')?.addEventListener('click', keyRotationSave);
+           el('kr-reload-btn')?.addEventListener('click', keyRotationLoad);
            el('config-yaml')?.addEventListener('input', () => {
              setConfigSaveEnabled(false);
              if (configValidateTimer) clearTimeout(configValidateTimer);
@@ -2802,6 +3328,7 @@ header_forwarding:
            el('delete-header-confirm-btn')?.addEventListener('click', headersDeleteConfirmed);
            el('keys-refresh-btn')?.addEventListener('click', keysRefresh);
            el('rotate-proxy-btn')?.addEventListener('click', rotateProxy);
+           el('rotate-issuer-btn')?.addEventListener('click', rotateIssuer);
            el('rotate-admin-btn')?.addEventListener('click', rotateAdmin);
            if (el('config-yaml') && !el('config-yaml').value.trim()) {
              el('config-yaml').value = DEFAULT_CONFIG_YAML_TEMPLATE;
@@ -2814,6 +3341,7 @@ header_forwarding:
                debugLoadTrace();
                loadLoggingStatus();
                configLoad();
+               keyRotationLoad();
                headersList();
                keysRefresh();
              }
@@ -2828,7 +3356,7 @@ header_forwarding:
 
 async function handleDebugGet(env) {
   const config = await loadConfigV1(env);
-  const maxTtlSeconds = Number(config?.debug?.max_ttl_seconds || 3600);
+  const maxTtlSeconds = Number(config?.debug?.max_debug_session_seconds || 3600);
   const enabledUntilMs = await readDebugEnabledUntilMs(env);
   const now = Date.now();
   return jsonResponse(200, {
@@ -2837,7 +3365,7 @@ async function handleDebugGet(env) {
       enabled: enabledUntilMs > now,
       enabled_until_ms: enabledUntilMs || 0,
       ttl_remaining_seconds: enabledUntilMs > now ? Math.ceil((enabledUntilMs - now) / 1000) : 0,
-      max_ttl_seconds: maxTtlSeconds,
+      max_debug_session_seconds: maxTtlSeconds,
     },
     meta: {},
   });
@@ -2854,7 +3382,7 @@ async function handleDebugPut(request, env) {
   }
 
   const config = await loadConfigV1(env);
-  const maxTtlSeconds = Number(config?.debug?.max_ttl_seconds || 3600);
+  const maxTtlSeconds = Number(config?.debug?.max_debug_session_seconds || 3600);
 
   if (!enabled) {
     await env.CONFIG.put(KV_DEBUG_ENABLED_UNTIL_MS, "0");
@@ -2864,7 +3392,7 @@ async function handleDebugPut(request, env) {
         enabled: false,
         enabled_until_ms: 0,
         ttl_remaining_seconds: 0,
-        max_ttl_seconds: maxTtlSeconds,
+        max_debug_session_seconds: maxTtlSeconds,
       },
       meta: {},
     });
@@ -2877,9 +3405,9 @@ async function handleDebugPut(request, env) {
     });
   }
   if (ttlSecondsRaw > maxTtlSeconds) {
-    throw new HttpError(400, "INVALID_REQUEST", "ttl_seconds exceeds configured debug.max_ttl_seconds", {
+    throw new HttpError(400, "INVALID_REQUEST", "ttl_seconds exceeds configured debug.max_debug_session_seconds", {
       received: ttlSecondsRaw,
-      max_ttl_seconds: maxTtlSeconds,
+      max_debug_session_seconds: maxTtlSeconds,
     });
   }
 
@@ -2891,7 +3419,7 @@ async function handleDebugPut(request, env) {
       enabled: true,
       enabled_until_ms: enabledUntilMs,
       ttl_remaining_seconds: ttlSecondsRaw,
-      max_ttl_seconds: maxTtlSeconds,
+      max_debug_session_seconds: maxTtlSeconds,
     },
     meta: {},
   });
@@ -2900,14 +3428,14 @@ async function handleDebugPut(request, env) {
 async function handleDebugDelete(env) {
   await env.CONFIG.put(KV_DEBUG_ENABLED_UNTIL_MS, "0");
   const config = await loadConfigV1(env);
-  const maxTtlSeconds = Number(config?.debug?.max_ttl_seconds || 3600);
+  const maxTtlSeconds = Number(config?.debug?.max_debug_session_seconds || 3600);
   return jsonResponse(200, {
     ok: true,
     data: {
       enabled: false,
       enabled_until_ms: 0,
       ttl_remaining_seconds: 0,
-      max_ttl_seconds: maxTtlSeconds,
+      max_debug_session_seconds: maxTtlSeconds,
     },
     meta: {},
   });
@@ -2971,48 +3499,16 @@ async function handleEnrichedHeaderDelete(env, headerNameRaw) {
 
 async function handleInitPage(env, request) {
   ensureKvBinding(env);
-  const [existingProxy, existingAdmin] = await Promise.all([env.CONFIG.get(KV_PROXY_KEY), env.CONFIG.get(KV_ADMIN_KEY)]);
-  let createdProxy = null;
-  let createdAdmin = null;
-  const testingDocsUrl = getDocsSectionUrl(env, "testing-out-your-proxy");
+  const { createdProxy, createdAdmin } = await bootstrapMissingKeys(env);
   const keyManagementDocsUrl = getDocsSectionUrl(env, "key-management");
-
-  if (!existingProxy) {
-    createdProxy = generateSecret();
-    await Promise.all([
-      env.CONFIG.put(KV_PROXY_KEY, createdProxy),
-      env.CONFIG.put(KV_PROXY_KEY_ROTATED_AT, String(Date.now())),
-    ]);
-  }
-  if (!existingAdmin) {
-    createdAdmin = generateSecret();
-    await Promise.all([
-      env.CONFIG.put(KV_ADMIN_KEY, createdAdmin),
-      env.CONFIG.put(KV_ADMIN_KEY_ROTATED_AT, String(Date.now())),
-    ]);
-  }
-
-  if (!createdProxy && !createdAdmin) {
-    return new Response(
-      htmlPage(
-        "Proxy already initialized. Keys are only shown once.",
-        `<p>Instructions to create new keys:</p>
-         <p><a href="${escapeHtml(
-           keyManagementDocsUrl
-         )}" target="_blank" rel="noopener noreferrer">Rotating Keys</a></p>
-         <p>Other Instructions</p>
-         <p><a href="${escapeHtml(testingDocsUrl)}" target="_blank" rel="noopener noreferrer">Testing out your proxy</a></p>`
-      ),
-      { headers: { "content-type": "text/html; charset=utf-8" } }
-    );
-  }
+  const docsUrl = getDocsBaseUrl(env);
 
   return new Response(
     htmlPage(
       "API Transform Proxy",
-      `<div style="display:flex;align-items:center;gap:12px;margin:0 0 8px 0;">
-         <img src="${FAVICON_DATA_URL}" width="72" height="72" alt="API Transform Proxy icon" />
-       </div>
+      `${renderOnboardingHeader()}
+       <h2 style="margin:0 0 10px 0;">Get Started</h2>
+       <h3 style="margin:0 0 10px 0;">Step 1 - Get your credentials</h3>
        <div role="alert" style="border:1px solid #fecaca;background:#fff1f2;color:#7f1d1d;border-radius:10px;padding:10px 12px;margin:0 0 12px 0;">
          <div style="font-weight:700;">Save these API keys now</div>
          <div style="font-size:13px;">This is the only time they will be visible. Store them securely before leaving this page.</div>
@@ -3039,63 +3535,58 @@ async function handleInitPage(env, request) {
              )}" target="_blank" rel="noopener noreferrer">Rotating keys</a> to generate new keys.`,
          !!createdProxy
        )}
-       <p><b>How to reset keys</b><br />
-       <a href="${escapeHtml(keyManagementDocsUrl)}" target="_blank" rel="noopener noreferrer">Rotating keys</a></p>
-       <p><b>How to test</b><br />
-       <a href="${escapeHtml(testingDocsUrl)}" target="_blank" rel="noopener noreferrer">Testing out your proxy</a></p>
-       ${renderSecretFieldScript()}`
+       <h2 style="margin:16px 0 10px 0;">Step 2 - View/Configure This Proxy</h2>
+       ${renderAdminLoginOptions(docsUrl)}
+       ${renderSecretFieldScript()}
+       ${renderInitAdminLoginScript(ADMIN_ROOT)}`
     ),
     { headers: { "content-type": "text/html; charset=utf-8" } }
   );
 }
 
-function renderSecretField(label, value, id, note = "", actionsEnabled = true) {
-  const safeLabel = escapeHtml(label);
-  const safeValue = escapeHtml(value);
-  const safeId = escapeHtml(id);
-  const noteHtml = String(note || "");
-  const disabledAttr = actionsEnabled ? "" : " disabled";
-  const buttonStyle = actionsEnabled
-    ? "padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;cursor:pointer;"
-    : "padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;background:#f3f4f6;color:#9ca3af;cursor:not-allowed;opacity:0.85;";
-  return `
-    <div style="margin:14px 0;">
-      <div style="font-weight:700;margin-bottom:6px;">${safeLabel}</div>
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-        <input id="${safeId}" type="password" value="${safeValue}" readonly
-          style="flex:1;min-width:320px;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace;" />
-        <button type="button" data-toggle-for="${safeId}" onclick="toggleSecret('${safeId}')"
-          style="${buttonStyle}"${disabledAttr}>Show</button>
-        <button type="button" data-copy-for="${safeId}" onclick="copySecret('${safeId}')"
-          style="${buttonStyle}"${disabledAttr}>Copy</button>
-      </div>
-      ${noteHtml ? `<div style="margin-top:6px;color:#6b7280;font-size:12px;">${noteHtml}</div>` : ""}
-    </div>
-  `;
+async function bootstrapMissingKeys(env) {
+  ensureKvBinding(env);
+  const [existingProxy, existingAdmin] = await Promise.all([env.CONFIG.get(KV_PROXY_KEY), env.CONFIG.get(KV_ADMIN_KEY)]);
+  let createdProxy = null;
+  let createdAdmin = null;
+  const writes = [];
+
+  if (!existingProxy) {
+    createdProxy = generateSecret();
+    writes.push(env.CONFIG.put(KV_PROXY_KEY, createdProxy), env.CONFIG.put(KV_PROXY_PRIMARY_KEY_CREATED_AT, String(Date.now())));
+  }
+  if (!existingAdmin) {
+    createdAdmin = generateSecret();
+    writes.push(env.CONFIG.put(KV_ADMIN_KEY, createdAdmin), env.CONFIG.put(KV_ADMIN_PRIMARY_KEY_CREATED_AT, String(Date.now())));
+  }
+  if (writes.length > 0) await Promise.all(writes);
+
+  return {
+    createdProxy,
+    createdAdmin,
+    proxyExists: !!(existingProxy || createdProxy),
+    adminExists: !!(existingAdmin || createdAdmin),
+  };
 }
 
-function renderSecretFieldScript() {
-  return `<script>
-    function toggleSecret(id) {
-      const input = document.getElementById(id);
-      const btn = document.querySelector('[data-toggle-for=\"' + id + '\"]');
-      if (!input || !btn || btn.disabled) return;
-      const isHidden = input.type === 'password';
-      input.type = isHidden ? 'text' : 'password';
-      btn.textContent = isHidden ? 'Hide' : 'Show';
-    }
-    async function copySecret(id) {
-      const input = document.getElementById(id);
-      const btn = document.querySelector('[data-copy-for=\"' + id + '\"]');
-      if (!input || !btn || btn.disabled || !input.value) return;
-      try {
-        await navigator.clipboard.writeText(input.value);
-        const old = btn.textContent;
-        btn.textContent = 'Copied';
-        setTimeout(() => { btn.textContent = old; }, 1200);
-      } catch {}
-    }
-  </script>`;
+async function handleBootstrapPost(env) {
+  const { createdProxy, createdAdmin } = await bootstrapMissingKeys(env);
+  if (!createdProxy && !createdAdmin) {
+    throw new HttpError(409, "ALREADY_INITIALIZED", "Proxy and admin keys already exist; existing keys are never returned.");
+  }
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      description: "initialization key generation",
+      proxy_key: createdProxy || null,
+      admin_key: createdAdmin || null,
+    },
+  });
+}
+
+function getDocsBaseUrl(env) {
+  const raw = String(env?.DOCS_URL || DEFAULT_DOCS_URL || "").trim();
+  return (raw ? raw : DEFAULT_DOCS_URL).replace(/#.*$/, "");
 }
 
 function getDocsSectionUrl(env, sectionAnchor) {
@@ -3104,32 +3595,34 @@ function getDocsSectionUrl(env, sectionAnchor) {
   return `${base}#${sectionAnchor}`;
 }
 
-async function handleRotate(request, env) {
+async function handleRotateByKind(kind, request, env) {
+  const cfg = keyKindConfig(kind);
   const overlapMs = getEnvInt(env, "ROTATE_OVERLAP_MS", DEFAULTS.ROTATE_OVERLAP_MS);
-  const oldExpiresAt = Date.now() + Math.max(0, overlapMs);
-  const current = await getProxyKey(env);
+  const now = Date.now();
+  const oldExpiresAt = now + Math.max(0, overlapMs);
+  const [state, config] = await Promise.all([getKeyAuthState(kind, env), loadConfigV1(env)]);
+  const current = state.current;
+  const currentPrimaryCreatedAt = parseMs(state.primaryCreatedAt);
   const newKey = generateSecret();
-  await env.CONFIG.put(KV_PROXY_KEY, newKey);
+  const expirySeconds = config?.apiKeyPolicy?.[cfg.policyKey] ?? null;
+
+  await Promise.all([env.CONFIG.put(cfg.current, newKey), env.CONFIG.put(cfg.primaryCreatedAt, String(now))]);
   if (current && overlapMs > 0) {
     await Promise.all([
-      env.CONFIG.put(KV_PROXY_KEY_OLD, current),
-      env.CONFIG.put(KV_PROXY_KEY_OLD_EXPIRES_AT, String(oldExpiresAt)),
-      env.CONFIG.put(KV_PROXY_KEY_ROTATED_AT, String(Date.now())),
+      env.CONFIG.put(cfg.old, current),
+      env.CONFIG.put(cfg.oldExpiresAt, String(oldExpiresAt)),
+      env.CONFIG.put(cfg.secondaryCreatedAt, String(currentPrimaryCreatedAt || now)),
     ]);
   } else {
-    await Promise.all([
-      env.CONFIG.delete(KV_PROXY_KEY_OLD),
-      env.CONFIG.delete(KV_PROXY_KEY_OLD_EXPIRES_AT),
-      env.CONFIG.put(KV_PROXY_KEY_ROTATED_AT, String(Date.now())),
-    ]);
+    await Promise.all([env.CONFIG.delete(cfg.old), env.CONFIG.delete(cfg.oldExpiresAt), env.CONFIG.delete(cfg.secondaryCreatedAt)]);
   }
 
   const acceptsHtml = (request.headers.get("accept") || "").includes("text/html");
   if (acceptsHtml) {
     return new Response(
       htmlPage(
-        "Key rotated",
-        `<p>Store this new key in Bubble and replace the old value immediately.</p>
+        `${capitalize(kind)} key rotated`,
+        `<p>Store this new ${escapeHtml(kind)} key and replace the old value immediately.</p>
          <pre style="padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-all;">${escapeHtml(
            newKey
          )}</pre>`
@@ -3140,40 +3633,13 @@ async function handleRotate(request, env) {
 
   return jsonResponse(200, {
     ok: true,
-    data: { new_key: newKey },
-    meta: {
-      rotated: true,
+    data: {
+      kind,
+      [cfg.responseKey]: newKey,
       old_key_overlap_active: !!current && overlapMs > 0,
       old_key_overlap_ms: current ? Math.max(0, overlapMs) : 0,
+      expiry_seconds: expirySeconds,
     },
-  });
-}
-
-async function handleRotateAdmin(request, env) {
-  const newAdminKey = generateSecret();
-  await Promise.all([
-    env.CONFIG.put(KV_ADMIN_KEY, newAdminKey),
-    env.CONFIG.put(KV_ADMIN_KEY_ROTATED_AT, String(Date.now())),
-  ]);
-
-  const acceptsHtml = (request.headers.get("accept") || "").includes("text/html");
-  if (acceptsHtml) {
-    return new Response(
-      htmlPage(
-        "Admin key rotated",
-        `<p>Store this new admin key and replace the old value immediately.</p>
-         <pre style="padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-all;">${escapeHtml(
-           newAdminKey
-         )}</pre>`
-      ),
-      { headers: { "content-type": "text/html; charset=utf-8" } }
-    );
-  }
-
-  return jsonResponse(200, {
-    ok: true,
-    data: { new_admin_key: newAdminKey },
-    meta: { rotated_admin_key: true },
   });
 }
 
@@ -3536,35 +4002,4 @@ async function handleRequestCore(request, env, payload, ctx) {
     finalEnvelope
   );
   return jsonResponse(200, finalEnvelope, debugHeaders);
-}
-
-function htmlPage(title, bodyHtml) {
-  const heading = title ? `<h2>${escapeHtml(title)}</h2>` : "";
-  return `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>${escapeHtml(title)}</title>
-  <link rel="icon" type="image/svg+xml" href="${FAVICON_DATA_URL}" />
-  <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 32px; max-width: 820px; }
-    p { font-size: 16px; }
-    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
-  </style>
-</head>
-<body>
-  ${heading}
-  ${bodyHtml}
-</body>
-</html>`;
-}
-
-function escapeHtml(s) {
-  return String(s)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
 }

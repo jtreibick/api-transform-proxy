@@ -44,8 +44,12 @@ Customer-self-hosted Worker that relays upstream API calls and optionally applie
 - Call `POST /_apiproxy/request` from Bubble/API client with `X-Proxy-Key`.
 
 8. Rotate keys when needed:
-- Proxy key: `POST /_apiproxy/admin/rotate`
-- Admin key: `POST /_apiproxy/admin/rotate-admin`
+- Self-rotation with same credential:
+  - Proxy key: `POST /_apiproxy/keys/proxy/rotate` with `X-Proxy-Key`
+  - Issuer key: `POST /_apiproxy/keys/issuer/rotate` with `X-Issuer-Key`
+  - Admin key: `POST /_apiproxy/keys/admin/rotate` with `X-Admin-Key`
+- Admin override rotation:
+  - `POST /_apiproxy/admin/keys/{proxy|issuer|admin}/rotate` with `X-Admin-Key`
 
 For curl-based API verification, use the **Testing out your proxy** section below.
 
@@ -54,19 +58,17 @@ For curl-based API verification, use the **Testing out your proxy** section belo
 - Keys are shown only once on `GET /_apiproxy` when they are created.
 - If keys already exist, `GET /_apiproxy` will not reveal them again.
 
-Proxy key rotation:
-- Call `POST /_apiproxy/admin/rotate` with `X-Admin-Key`.
-- The endpoint returns the new proxy key once.
-- Old proxy key remains valid for a short overlap window (configurable by `ROTATE_OVERLAP_MS`).
-
-Admin key rotation:
-- Call `POST /_apiproxy/admin/rotate-admin` with current `X-Admin-Key`.
-- The endpoint returns the new admin key once.
+Key rotation:
+- Proxy self-rotation: `POST /_apiproxy/keys/proxy/rotate` with `X-Proxy-Key`.
+- Issuer self-rotation: `POST /_apiproxy/keys/issuer/rotate` with `X-Issuer-Key`.
+- Admin self-rotation: `POST /_apiproxy/keys/admin/rotate` with `X-Admin-Key`.
+- Admin override: `POST /_apiproxy/admin/keys/{proxy|issuer|admin}/rotate` with `X-Admin-Key`.
+- All rotate responses include `expiry_seconds` from YAML `apiKeyPolicy` (`null` means long-lived).
 
 Recovery when admin key is lost:
 1. Open Cloudflare dashboard for this Worker.
 2. Open KV namespace `CONFIG`.
-3. Delete `admin_key` (and optionally `proxy_key`, `proxy_key_old`, `proxy_key_old_expires_at`).
+3. Delete `admin_key` (and optionally `admin_key_old`, `admin_key_old_expires_at`, `proxy_key`, `proxy_key_old`, `proxy_key_old_expires_at`, `issuer_key`, `issuer_key_old`, `issuer_key_old_expires_at`).
 4. Revisit `/_apiproxy` to recreate missing keys.
 
 <p><strong style="color:#b91c1c;">Important: after deleting keys in Cloudflare KV, propagation may take up to 2 minutes. During that window, <code>/_apiproxy</code> can still detect the old key state and will not recreate keys yet. Wait and refresh to avoid confusion.</strong></p>
@@ -96,11 +98,7 @@ Notes:
 targetHost: api.vendor.com # string or null
 
 debug:
-  max_ttl_seconds: 3600     # default 1 hour, max 604800 (7 days)
-  redact_headers:           # additional debug-trace header blacklist (lowercase recommended)
-    - authorization
-    - cookie
-    - x-proxy-key
+  max_debug_session_seconds: 3600     # default 1 hour, max 604800 (7 days)
 
 transform:
   enabled: true
@@ -134,8 +132,8 @@ header_forwarding:
 - `CONFIG` KV binding must exist and be bound in `wrangler.toml`.
 - `jsonata` and `yaml` must be installed from `package.json` dependencies.
 - Optional: set `BOOTSTRAP_CONFIG_YAML` to define config from env. When set, it overrides KV config.
-- Optional: `debug.max_ttl_seconds` controls debug-window max duration; default `3600`, max `604800`.
-- Optional: `debug.redact_headers` lets you add header names to redact in debug traces/log forwarding.
+- Optional: `debug.max_debug_session_seconds` controls debug-window max duration; default `3600`, max `604800`.
+- Debug traces always redact: `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-proxy-key`, `x-admin-key`.
 - Optional: set `BOOTSTRAP_ENRICHED_HEADERS_JSON` to define enriched headers from deploy config.
   - Values support `${VAR_NAME}` placeholders.
   - Example secret variable: `TARGET_AUTH_BEARER` (or `targetAuthBearer`).
@@ -208,45 +206,44 @@ wrangler secret put TARGET_AUTH_BEARER
   - Uses `BUILD_VERSION` env var, defaults to `dev` if unset.
 - `GET /_apiproxy/admin`
   - Browser admin console for all admin endpoints.
-  - Prompts for `X-Admin-Key`, then provides UI controls for status, config, debug/logging, enrichments, and key rotation.
+  - Prompts for `X-Admin-Key`, exchanges it for short-lived access token, then provides UI controls for status, config, debug/logging, enrichments, and key rotation.
 - `POST /_apiproxy/admin/access-token`
   - Requires header `X-Admin-Key`.
-  - Returns short-lived admin access token.
   - Response: `{ "ok": true, "data": { "access_token": "...", "expires_at_ms": 123, "ttl_seconds": 3600 } }`
 - `GET /_apiproxy/admin/debug`
-  - Requires `X-Admin-Access-Token` (or `X-Admin-Key`).
-  - Returns debug status, remaining TTL, and configured `debug.max_ttl_seconds`.
+  - Requires `X-Admin-Key`.
+  - Returns debug status, remaining TTL, and configured `debug.max_debug_session_seconds`.
 - `PUT /_apiproxy/admin/debug`
-  - Requires header `X-Admin-Key`.
+  - Requires `X-Admin-Key`.
   - Requires `Content-Type: application/json`.
   - Body:
     - enable: `{ "enabled": true, "ttl_seconds": 3600 }`
     - disable: `{ "enabled": false }`
-  - `ttl_seconds` must be <= `debug.max_ttl_seconds` from config.
+  - `ttl_seconds` must be <= `debug.max_debug_session_seconds` from config.
 - `DELETE /_apiproxy/admin/debug`
-  - Requires header `X-Admin-Key`.
+  - Requires `X-Admin-Key`.
   - Disables debug immediately (no request body required).
 - `GET /_apiproxy/admin/debug/last`
-  - Requires header `X-Admin-Key`.
+  - Requires `X-Admin-Key`.
   - Returns most recent debug trace captured in this Worker instance.
   - `Accept: text/plain` returns plain text trace.
 - `PUT /_apiproxy/admin/debug/loggingSecret`
-  - Requires `X-Admin-Access-Token` (or `X-Admin-Key`).
+  - Requires `X-Admin-Key`.
   - Requires `Content-Type: application/json`.
   - Stores logging auth secret in KV.
   - Body: `{ "value": "..." }`
 - `GET /_apiproxy/admin/debug/loggingSecret`
-  - Requires `X-Admin-Access-Token` (or `X-Admin-Key`).
+  - Requires `X-Admin-Key`.
   - Returns whether a logging auth secret is currently set.
 - `DELETE /_apiproxy/admin/debug/loggingSecret`
-  - Requires `X-Admin-Access-Token` (or `X-Admin-Key`).
+  - Requires `X-Admin-Key`.
   - Removes logging auth secret from KV.
 - `POST /_apiproxy/request`
   - Requires header `X-Proxy-Key`.
   - Requires `Content-Type: application/json`.
   - Host resolution is config-driven:
     - if `targetHost` is set in admin config, it is always used and `X-Proxy-Host` is rejected (`HOST_OVERRIDE_NOT_ALLOWED`).
-    - if `targetHost` is unset, `X-Proxy-Host` (or `XProxyHost`) is required (`MISSING_UPSTREAM_HOST`).
+    - if `targetHost` is unset, `X-Proxy-Host` is required (`MISSING_UPSTREAM_HOST`).
   - When host is provided by config/header, `upstream.url` may be relative (for example `/v1/customers`).
   - Forwarding behavior is config-driven by `header_forwarding.mode` + `header_forwarding.names`.
   - Enriched headers are injected last and override both forwarded incoming headers and per-request `upstream.headers`.
@@ -260,13 +257,25 @@ wrangler secret put TARGET_AUTH_BEARER
   - Relays request to upstream and returns envelope:
     - success: `{ "ok": true, "data": ..., "meta": { ... } }`
     - error: `{ "error": { "code": ..., "message": ..., "details?": ... }, "meta?": { ... } }`
-- `POST /_apiproxy/admin/rotate`
+- `POST /_apiproxy/keys/proxy/rotate`
+  - Requires header `X-Proxy-Key`.
+  - Rotates proxy key and returns new key once.
+- `POST /_apiproxy/keys/issuer/rotate`
+  - Requires header `X-Issuer-Key`.
+  - Rotates issuer key and returns new key once.
+- `POST /_apiproxy/keys/admin/rotate`
   - Requires header `X-Admin-Key`.
-  - Rotates key and returns new key once.
-  - During overlap window, old key is accepted temporarily (`proxy_key_old` + expiry in KV).
-- `POST /_apiproxy/admin/rotate-admin`
+  - Rotates admin key and returns new key once.
+- `POST /_apiproxy/admin/keys/{proxy|issuer|admin}/rotate`
   - Requires header `X-Admin-Key`.
-  - Rotates admin key and returns the new admin key once.
+  - Admin override rotation for any key kind.
+- `GET /_apiproxy/admin/key-rotation-config`
+  - Requires header `X-Admin-Key`.
+  - Returns titled key-rotation config fields, including `request_yaml` and API key expiry policy fields.
+- `PUT /_apiproxy/admin/key-rotation-config`
+  - Requires header `X-Admin-Key`.
+  - Requires `Content-Type: application/json`.
+  - Saves key-rotation settings where `request_yaml` is a multiline YAML object and all other properties are field-mapped.
 - `GET /_apiproxy/admin/config`
   - Requires header `X-Admin-Key`.
   - Returns current config YAML (`text/yaml`).
