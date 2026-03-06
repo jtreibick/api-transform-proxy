@@ -552,6 +552,13 @@
            const base = window.location.origin || '';
            return base + SANDBOX_API_PREFIX + (suffix ? '/' + suffix : '');
          }
+         function sandboxUpdateAuthValueVisibility() {
+           const mode = el('sandbox-auth-mode')?.value || 'admin_token';
+           const wrap = el('sandbox-auth-value-wrap');
+           if (!wrap) return;
+           const needsValue = mode === 'admin_key' || mode === 'proxy_key' || mode === 'issuer_key';
+           wrap.style.display = needsValue ? 'block' : 'none';
+         }
          function sandboxSyncUrlFromSelection() {
            if (sandboxSyncingControls) return;
            const node = el('sandbox-url');
@@ -591,14 +598,19 @@
          }
          function sandboxBuildCurl(method, url, headers, bodyText) {
            const lines = [];
-           lines.push('curl -sS -X ' + String(method || 'GET').toUpperCase() + ' ' + shellQuote(url));
-           Object.entries(headers || {}).forEach(([name, value]) => {
+           const m = String(method || 'GET').toUpperCase();
+           const headerEntries = Object.entries(headers || {});
+           const includeBody = m !== 'GET' && m !== 'HEAD' && String(bodyText || '').length > 0;
+           if (includeBody && !headerEntries.some(([k]) => String(k).toLowerCase() === 'content-type')) {
+             headerEntries.push(['Content-Type', 'application/json']);
+           }
+           lines.push('curl -sS -X ' + m + ' ' + shellQuote(url) + ' \\');
+           headerEntries.forEach(([name, value]) => {
              lines.push('  -H ' + shellQuote(name + ': ' + sandboxRedactHeader(name, value)) + ' \\');
            });
-           const includeBody = method !== 'GET' && method !== 'HEAD' && String(bodyText || '').length > 0;
            if (includeBody) {
              lines.push('  --data-binary ' + shellQuote(String(bodyText)));
-           } else if (lines.length > 1) {
+           } else if (lines.length > 0) {
              const last = lines[lines.length - 1];
              if (last.endsWith(' \\')) lines[lines.length - 1] = last.slice(0, -2);
            }
@@ -609,7 +621,7 @@
            const pathNode = el('sandbox-path');
            const baseNode = el('sandbox-base-url');
            if (!verbNode || !pathNode) return;
-           if (baseNode) baseNode.textContent = window.location.origin || '';
+           if (baseNode) baseNode.textContent = (window.location.origin || '') + SANDBOX_API_PREFIX;
            const paths = Array.from(new Set(
              Object.values(SANDBOX_TEMPLATES)
                .map((t) => sandboxPathToSuffix(String(t.path || '')))
@@ -639,6 +651,8 @@
              sandboxSyncingControls = false;
              sandboxSyncUrlFromSelection();
            }
+           if (el('sandbox-auth-mode')) el('sandbox-auth-mode').value = tpl.auth_mode || 'admin_token';
+           sandboxUpdateAuthValueVisibility();
            if (el('sandbox-extra-headers')) el('sandbox-extra-headers').value = JSON.stringify(tpl.headers || {}, null, 2);
            if (el('sandbox-body')) {
              if (tpl.body == null) {
@@ -670,10 +684,14 @@
            sandboxTemplateKey = '';
            sandboxSyncUrlFromSelection();
          }
-         function sandboxBuildAuthHeader(valueOverride) {
-           const override = String(valueOverride || '').trim();
-           if (override) return { Authorization: 'Bearer ' + override };
-           return currentKey ? { Authorization: 'Bearer ' + currentKey } : {};
+         function sandboxBuildAuthHeader(mode, value) {
+           const v = String(value || '').trim();
+           if (mode === 'none') return {};
+           if (mode === 'admin_token') return currentKey ? { Authorization: 'Bearer ' + currentKey } : {};
+           if (mode === 'admin_key') return v ? { 'X-Admin-Key': v } : {};
+           if (mode === 'proxy_key') return v ? { 'X-Proxy-Key': v } : {};
+           if (mode === 'issuer_key') return v ? { 'X-Issuer-Key': v } : {};
+           return {};
          }
          async function sandboxSend() {
            try {
@@ -681,6 +699,7 @@
               const suffix = String(el('sandbox-path')?.value || '');
               const tplMatch = sandboxFindTemplate(method, suffix);
               const tpl = tplMatch ? tplMatch.tpl : null;
+              const authMode = el('sandbox-auth-mode')?.value || 'admin_token';
               const authValue = el('sandbox-auth-value')?.value || '';
               const url = String(el('sandbox-url')?.value || sandboxBuildUrlFromSelection()).trim();
               if (!url) throw new Error('Request URL is required.');
@@ -694,7 +713,7 @@
                 throw new Error('Extra headers must be a JSON object.');
               }
               const templateHeaders = (tpl && tpl.headers && typeof tpl.headers === 'object' && !Array.isArray(tpl.headers)) ? tpl.headers : {};
-              const headers = { ...templateHeaders, ...extraHeaders, ...sandboxBuildAuthHeader(authValue) };
+              const headers = { ...templateHeaders, ...extraHeaders, ...sandboxBuildAuthHeader(authMode, authValue) };
               let bodyText = el('sandbox-body')?.value ?? '';
              const curlText = sandboxBuildCurl(method, url, headers, bodyText);
              setOutput('sandbox-request', curlText);
@@ -722,6 +741,7 @@
            if (!el('sandbox-verb') || !el('sandbox-path')) return;
            sandboxRenderSelectors();
            if (!sandboxTemplateKey) sandboxApplyTemplate('request_passthrough');
+           sandboxUpdateAuthValueVisibility();
            sandboxSyncUrlFromSelection();
          }
          async function headersList() {
@@ -961,6 +981,7 @@
            el('rotate-admin-btn')?.addEventListener('click', rotateAdmin);
            el('sandbox-verb')?.addEventListener('change', sandboxApplyTemplateForSelection);
            el('sandbox-path')?.addEventListener('change', sandboxApplyTemplateForSelection);
+           el('sandbox-auth-mode')?.addEventListener('change', sandboxUpdateAuthValueVisibility);
            el('sandbox-send-btn')?.addEventListener('click', sandboxSend);
            try {
              const token = sessionStorage.getItem(ADMIN_ACCESS_TOKEN_STORAGE) || '';
