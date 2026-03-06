@@ -130,6 +130,7 @@ header_forwarding:
 ## Required setup
 
 - `CONFIG` KV binding must exist and be bound in `wrangler.toml`.
+- Deploy from repository root so Wrangler reads the intended `wrangler.toml`.
 - `jsonata` and `yaml` must be installed from `package.json` dependencies.
 - Optional: set `BOOTSTRAP_CONFIG_YAML` to define config from env. When set, it overrides KV config.
 - Optional: `debug.max_debug_session_seconds` controls debug-window max duration; default `3600`, max `604800`.
