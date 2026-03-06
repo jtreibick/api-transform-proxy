@@ -40,9 +40,12 @@ export function htmlPage(title, bodyHtml) {
   });
 }
 
-export function renderOnboardingHeader() {
+export function renderOnboardingHeader(proxyName = "") {
+  const name = String(proxyName || "").trim();
   return renderTemplate("onboarding_header", {
     favicon_data_url: FAVICON_DATA_URL,
+    proxy_name: escapeHtml(name),
+    proxy_name_style: name ? "" : "display:none;",
   });
 }
 

@@ -172,11 +172,11 @@
         function openConfigTab() {
           document.querySelector('.tab-btn[data-tab="config"]')?.click();
         }
-         function setOutboundMode(mode) {
-           const m = String(mode || '').trim();
-           const staticNode = el('outbound-static-fields');
-           const autoNode = el('outbound-auto-fields');
-           const isStatic = m === 'static_header';
+        function setOutboundMode(mode) {
+          const m = String(mode || 'static_header').trim();
+          const staticNode = el('outbound-static-fields');
+          const autoNode = el('outbound-auto-fields');
+          const isStatic = m === 'static_header';
            if (staticNode) staticNode.style.display = isStatic ? 'block' : 'none';
            if (autoNode) autoNode.style.display = isStatic ? 'none' : 'block';
          }
@@ -325,6 +325,7 @@
         }
         function formatOverviewStatus(version, debug, headers, targetHost, proxyName) {
           const versionText = version?.data?.version || 'unknown';
+          const buildTimestamp = version?.data?.build_timestamp || '';
           const debugData = debug?.data || {};
           const debugEnabled = !!debugData.enabled;
           const enrichedHeaders = Array.isArray(headers?.enriched_headers)
@@ -332,6 +333,7 @@
             : (Array.isArray(headers?.data?.enriched_headers) ? headers.data.enriched_headers : []);
           return '<div><b>Proxy Name:</b> ' + (proxyName || 'n/a') + '</div>'
             + '<div><b>Build Version:</b> ' + versionText + '</div>'
+            + '<div><b>Last Deployed:</b> ' + (buildTimestamp || 'n/a') + '</div>'
             + '<div><b>Debug Enabled:</b> ' + (debugEnabled ? 'yes' : 'no') + '</div>'
             + '<div><b>Target URL:</b> ' + (targetHost || 'n/a') + '</div>'
             + '<div><b>Enrichments:</b> ' + (enrichedHeaders.length ? enrichedHeaders.join(', ') : 'n/a') + '</div>';
@@ -433,7 +435,8 @@
             const enabledText = d.enabled ? 'enabled' : 'disabled';
             if (el('logging-status')) {
               const html = d.enabled
-                ? '<a href="#" id="logging-disable-link">disable</a> | ' + enabledText
+                ? '<div style="background:#fef9c3;border:1px solid #fde68a;color:#92400e;padding:8px 10px;border-radius:8px;margin-bottom:6px;">Logging is enabled.</div>'
+                  + '<a href="#" id="logging-disable-link">disable</a> | ' + enabledText
                 : enabledText + ' | <a href="#" id="logging-enable-link">enable</a>';
               setHtml('logging-status', html);
             }
@@ -450,6 +453,7 @@
             const configEnabled = !!(endpointUrl || endpointAuthHeader);
             if (el('logging-config-enabled')) el('logging-config-enabled').checked = configEnabled;
             if (el('logging-config-fields')) el('logging-config-fields').style.display = configEnabled ? 'block' : 'none';
+            if (el('logging-secret-wrap')) el('logging-secret-wrap').style.display = configEnabled ? 'block' : 'none';
             const secretSet = !!secretStatus?.data?.logging_secret_set;
             setOutput('logging-output', 'Logging secret set: ' + (secretSet ? 'yes' : 'no'));
           } catch (e) {
@@ -579,11 +583,11 @@
              const inferredStaticKey = names.includes('authorization') ? 'authorization' : (names[0] || '');
              const staticHeaderKey = String(d.static_header_key || inferredStaticKey || '');
              const staticHeaderValue = String(d.static_header_value || '');
-             const outboundMode = staticHeaderKey ? 'static_header' : 'autorotation';
-             if (el('outbound-mode')) el('outbound-mode').value = outboundMode;
-             if (el('outbound-static-header-key')) el('outbound-static-header-key').value = staticHeaderKey;
-             if (el('outbound-static-header-value')) el('outbound-static-header-value').value = staticHeaderValue;
-             setOutboundMode(outboundMode);
+          const outboundMode = staticHeaderKey ? 'static_header' : 'autorotation';
+            if (el('outbound-mode')) el('outbound-mode').value = outboundMode || 'static_header';
+            if (el('outbound-static-header-key')) el('outbound-static-header-key').value = staticHeaderKey;
+            if (el('outbound-static-header-value')) el('outbound-static-header-value').value = staticHeaderValue;
+            setOutboundMode(outboundMode || 'static_header');
              setOutboundAuthEnabled(!!d.enabled);
              if (el('kr-enabled')) el('kr-enabled').checked = !!d.enabled;
              if (el('kr-strategy')) el('kr-strategy').value = d.strategy || 'json_ttl';
@@ -916,19 +920,20 @@
           }
           return next;
         }
-         async function transformConfigLoad() {
-           try {
-             const payload = await apiCall(ADMIN_ROOT + '/transform-config', 'GET');
-             const d = payload?.data || {};
-             const enabled = d.enabled !== false;
-             if (el('transform-global-enabled-outbound')) el('transform-global-enabled-outbound').checked = enabled;
-             if (el('transform-global-enabled-inbound')) el('transform-global-enabled-inbound').checked = enabled;
-             const outbound = d.outbound || {};
-             const inbound = d.inbound || {};
-             if (el('outbound-default-expr')) el('outbound-default-expr').value = String(outbound.defaultExpr || '');
-             if (el('outbound-fallback')) el('outbound-fallback').value = String(outbound.fallback || 'passthrough');
-             if (el('inbound-default-expr')) el('inbound-default-expr').value = String(inbound.defaultExpr || '');
-             if (el('inbound-fallback')) el('inbound-fallback').value = String(inbound.fallback || 'passthrough');
+        async function transformConfigLoad() {
+          try {
+            const payload = await apiCall(ADMIN_ROOT + '/transform-config', 'GET');
+            const d = payload?.data || {};
+            const enabled = d.enabled !== false;
+            if (el('transform-global-enabled-outbound')) el('transform-global-enabled-outbound').checked = enabled;
+            if (el('transform-global-enabled-inbound')) el('transform-global-enabled-inbound').checked = enabled;
+            const outbound = d.outbound || {};
+            const inbound = d.inbound || {};
+            if (el('inbound-header-blacklist')) el('inbound-header-blacklist').value = String(inbound?.header_blacklist || '');
+            if (el('outbound-default-expr')) el('outbound-default-expr').value = String(outbound.defaultExpr || '');
+            if (el('outbound-fallback')) el('outbound-fallback').value = String(outbound.fallback || 'passthrough');
+            if (el('inbound-default-expr')) el('inbound-default-expr').value = String(inbound.defaultExpr || '');
+            if (el('inbound-fallback')) el('inbound-fallback').value = String(inbound.fallback || 'passthrough');
             outboundRuleDrafts = Array.isArray(outbound.rules) ? outbound.rules.map(normalizeRuleForUi) : [];
             inboundRuleDrafts = Array.isArray(inbound.rules) ? inbound.rules.map(normalizeRuleForUi) : [];
             renderTransformRules('outbound');
@@ -947,21 +952,22 @@
              const globalEnabled = !!(el('transform-global-enabled-outbound')?.checked || el('transform-global-enabled-inbound')?.checked);
              const outboundRules = collectRuleDrafts('outbound');
              const inboundRules = collectRuleDrafts('inbound');
-             const payload = {
-               enabled: globalEnabled,
-               outbound: {
-                 enabled: true,
-                 defaultExpr: el('outbound-default-expr')?.value || '',
-                 fallback: el('outbound-fallback')?.value || 'passthrough',
-                 rules: outboundRules,
-               },
-               inbound: {
-                 enabled: true,
-                 defaultExpr: el('inbound-default-expr')?.value || '',
-                 fallback: el('inbound-fallback')?.value || 'passthrough',
-                 rules: inboundRules,
-               },
-             };
+            const payload = {
+              enabled: globalEnabled,
+              outbound: {
+                enabled: true,
+                defaultExpr: el('outbound-default-expr')?.value || '',
+                fallback: el('outbound-fallback')?.value || 'passthrough',
+                rules: outboundRules,
+              },
+              inbound: {
+                enabled: true,
+                defaultExpr: el('inbound-default-expr')?.value || '',
+                fallback: el('inbound-fallback')?.value || 'passthrough',
+                header_blacklist: el('inbound-header-blacklist')?.value || '',
+                rules: inboundRules,
+              },
+            };
             const out = await apiCall(ADMIN_ROOT + '/transform-config', 'PUT', payload);
             if (kind === 'outbound') setOutput('headers-output', out);
             else setOutput('inbound-transform-output', out);
@@ -1168,14 +1174,25 @@
            const bodyText = el('sandbox-body')?.value ?? '';
            return { method, url, headers, bodyText };
          }
-         function sandboxPreviewRequest() {
-           try {
-             const req = sandboxComputeRequestPreview();
-             setOutput('sandbox-request', sandboxBuildCurl(req.method, req.url, req.headers, req.bodyText));
-           } catch (e) {
-             setOutput('sandbox-request', String(e.message || e));
-           }
-         }
+        function sandboxPreviewRequest() {
+          try {
+            const req = sandboxComputeRequestPreview();
+            setOutput('sandbox-request', sandboxBuildCurl(req.method, req.url, req.headers, req.bodyText));
+          } catch (e) {
+            setOutput('sandbox-request', String(e.message || e));
+          }
+        }
+        function toggleSandboxSection(toggleId, wrapId) {
+          const link = el(toggleId);
+          const wrap = el(wrapId);
+          if (!link || !wrap) return;
+          link.addEventListener('click', (evt) => {
+            evt.preventDefault();
+            const hidden = wrap.style.display === 'none';
+            wrap.style.display = hidden ? 'block' : 'none';
+            link.textContent = hidden ? 'hide' : 'show';
+          });
+        }
          async function sandboxSend() {
            try {
               const req = sandboxComputeRequestPreview();
@@ -1395,6 +1412,7 @@
           updateProxyHeader('');
           document.querySelectorAll('.tab-panel').forEach((panel) => {
             const name = panel.id.replace('tab-', '');
+            if (name === 'sandbox') return;
             panel.addEventListener('input', () => markDirty(name));
             panel.addEventListener('change', () => markDirty(name));
           });
@@ -1462,6 +1480,7 @@
           el('logging-config-enabled')?.addEventListener('change', () => {
             const enabled = !!el('logging-config-enabled')?.checked;
             if (el('logging-config-fields')) el('logging-config-fields').style.display = enabled ? 'block' : 'none';
+            if (el('logging-secret-wrap')) el('logging-secret-wrap').style.display = enabled ? 'block' : 'none';
           });
            el('logging-open-config-link')?.addEventListener('click', (evt) => {
              evt.preventDefault();
@@ -1533,7 +1552,7 @@
              inboundRuleDrafts.push(emptyInboundRule());
              renderTransformRules('inbound');
            });
-          function handleRuleListClick(kind, evt) {
+        function handleRuleListClick(kind, evt) {
             const removeRuleBtn = evt.target?.closest ? evt.target.closest('.rule-remove-btn') : null;
             if (removeRuleBtn && removeRuleBtn.getAttribute('data-kind') === kind) {
               evt.preventDefault();
@@ -1548,8 +1567,14 @@
             const addHeaderBtn = evt.target?.closest ? evt.target.closest('.rule-header-add-btn') : null;
             if (addHeaderBtn && addHeaderBtn.getAttribute('data-kind') === kind) {
               evt.preventDefault();
+              const checkbox = document.querySelector('.rule-match-toggle[data-kind="' + kind + '"][data-index="' + addHeaderBtn.getAttribute('data-index') + '"][data-target^="rule-' + kind + '-"][data-target$="-headers"]');
+              if (checkbox) checkbox.checked = true;
               const idx = Number(addHeaderBtn.getAttribute('data-index') || -1);
-              if (idx >= 0) addHeaderMatchRule(kind, idx);
+              if (idx >= 0) {
+                addHeaderMatchRule(kind, idx);
+                const panel = document.getElementById('rule-' + kind + '-' + idx + '-headers');
+                if (panel) panel.style.display = 'block';
+              }
               return;
             }
             const removeHeaderBtn = evt.target?.closest ? evt.target.closest('.rule-header-remove-btn') : null;
@@ -1653,17 +1678,20 @@
            el('rotate-proxy-btn')?.addEventListener('click', rotateProxy);
            el('rotate-issuer-btn')?.addEventListener('click', rotateIssuer);
            el('rotate-admin-btn')?.addEventListener('click', rotateAdmin);
-           el('sandbox-verb')?.addEventListener('change', sandboxApplyTemplateForSelection);
-           el('sandbox-path')?.addEventListener('change', sandboxApplyTemplateForSelection);
-           el('sandbox-auth-mode')?.addEventListener('change', () => {
-             sandboxUpdateAuthValueVisibility();
-             sandboxPreviewRequest();
-           });
-           el('sandbox-auth-value')?.addEventListener('input', sandboxPreviewRequest);
-           el('sandbox-url')?.addEventListener('input', sandboxPreviewRequest);
-           el('sandbox-extra-headers')?.addEventListener('input', sandboxPreviewRequest);
-           el('sandbox-body')?.addEventListener('input', sandboxPreviewRequest);
-           el('sandbox-send-btn')?.addEventListener('click', sandboxSend);
+          el('sandbox-verb')?.addEventListener('change', sandboxApplyTemplateForSelection);
+          el('sandbox-path')?.addEventListener('change', sandboxApplyTemplateForSelection);
+          el('sandbox-auth-mode')?.addEventListener('change', () => {
+            sandboxUpdateAuthValueVisibility();
+            sandboxPreviewRequest();
+          });
+          el('sandbox-auth-value')?.addEventListener('input', sandboxPreviewRequest);
+          el('sandbox-url')?.addEventListener('input', sandboxPreviewRequest);
+          el('sandbox-extra-headers')?.addEventListener('input', sandboxPreviewRequest);
+          el('sandbox-body')?.addEventListener('input', sandboxPreviewRequest);
+          el('sandbox-send-btn')?.addEventListener('click', sandboxSend);
+          toggleSandboxSection('sandbox-url-toggle', 'sandbox-url-wrap');
+          toggleSandboxSection('sandbox-headers-toggle', 'sandbox-headers-wrap');
+          toggleSandboxSection('sandbox-body-toggle', 'sandbox-body-wrap');
            try {
              const token = sessionStorage.getItem(ADMIN_ACCESS_TOKEN_STORAGE) || '';
             if (token) {

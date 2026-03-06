@@ -49,7 +49,7 @@
              style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
            <p style="margin-top:12px;margin-bottom:6px;">Last Log</p>
            <pre id="debug-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;">Debug output appears here.</pre>
-           <p style="margin-top:10px;"><a href="#" id="debug-refresh-trace-link">Refresh last trace</a></p>
+           <p style="margin-top:10px;"><a href="#" id="debug-refresh-trace-link">Refresh</a></p>
            <p style="margin-top:16px;"><b>External Logging Configuration</b></p>
            <label style="display:flex;gap:8px;align-items:center;margin:8px 0 6px;">
              <input id="logging-config-enabled" type="checkbox" />
@@ -63,10 +63,12 @@
              <input id="logging-config-auth-header" type="text" readonly
                style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;margin-bottom:8px;" />
            </div>
-           <label for="logging-secret" style="display:block;margin:2px 0 4px;">Logging auth secret</label>
-           <input id="logging-secret" type="password" placeholder="set logging auth secret"
-             style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
-           <p style="font-size:13px;color:#475569;margin:4px 0 0 0;">Logging secrets are managed via this API only and are not stored in YAML.</p>
+           <div id="logging-secret-wrap">
+             <label for="logging-secret" style="display:block;margin:2px 0 4px;">Logging auth secret</label>
+             <input id="logging-secret" type="password" placeholder="set logging auth secret"
+               style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
+             <p style="font-size:13px;color:#475569;margin:4px 0 0 0;">Logging secrets are managed via this API only and are not stored in YAML.</p>
+           </div>
            <div style="margin-top:10px;"></div>
           <pre id="logging-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Logging output appears here.</pre>
           <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
@@ -102,8 +104,8 @@
            <div id="outbound-auth-fields">
            <label for="outbound-mode" style="display:block;margin:8px 0 4px;">Auth mode</label>
            <select id="outbound-mode" style="width:100%;max-width:420px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;">
-             <option value="autorotation">Auto-rotation</option>
              <option value="static_header">Static header</option>
+             <option value="autorotation">Auto-rotation</option>
            </select>
 
            <div id="outbound-static-fields" style="display:none;">
@@ -268,6 +270,10 @@
            <div style="margin-top:8px;">
              <button type="button" id="inbound-add-rule-btn">Add rule</button>
            </div>
+           <label for="inbound-header-blacklist" style="display:block;margin:12px 0 4px;">Header blacklist</label>
+           <input id="inbound-header-blacklist" type="text" placeholder="authorization, cookie"
+             style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+           <div style="font-size:12px;color:#64748b;margin-top:4px;">These headers will not be forwarded in the request.</div>
            <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;"></div>
           <pre id="inbound-transform-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Inbound transformation output appears here.</pre>
           <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
@@ -296,14 +302,23 @@
              <label for="sandbox-verb" style="display:block;margin:8px 0 4px;">Method</label>
              <select id="sandbox-verb" style="min-width:120px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;"></select>
              <label for="sandbox-url" style="display:block;margin:8px 0 4px;">Full Request URL (editable)</label>
-             <input id="sandbox-url" type="text"
-               style="width:100%;max-width:760px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+             <a href="#" id="sandbox-url-toggle" style="font-size:12px;text-decoration:underline;">hide</a>
+             <div id="sandbox-url-wrap">
+               <input id="sandbox-url" type="text"
+                 style="width:100%;max-width:760px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+             </div>
              <label for="sandbox-extra-headers" style="display:block;margin:8px 0 4px;">Request Headers (JSON object)</label>
-             <textarea id="sandbox-extra-headers" rows="4"
-               style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">{}</textarea>
+             <a href="#" id="sandbox-headers-toggle" style="font-size:12px;text-decoration:underline;">hide</a>
+             <div id="sandbox-headers-wrap">
+               <textarea id="sandbox-extra-headers" rows="4"
+                 style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">{}</textarea>
+             </div>
              <label for="sandbox-body" style="display:block;margin:8px 0 4px;">Request Body (JSON or raw text)</label>
-             <textarea id="sandbox-body" rows="10"
-               style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">{}</textarea>
+             <a href="#" id="sandbox-body-toggle" style="font-size:12px;text-decoration:underline;">hide</a>
+             <div id="sandbox-body-wrap">
+               <textarea id="sandbox-body" rows="10"
+                 style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">{}</textarea>
+             </div>
              <div style="margin-top:10px;">
                <button type="button" id="sandbox-send-btn">Make HTTP Request</button>
              </div>

@@ -134,6 +134,7 @@ const CONFIG_SCHEMA_V1 = {
       enabled: "boolean",
       defaultExpr: "string",
       fallback: "passthrough|error|transform_default",
+      header_blacklist: "comma-separated string",
       rules: [
         {
           name: "string",
@@ -242,6 +243,7 @@ const DEFAULT_CONFIG_V1 = {
       enabled: true,
       defaultExpr: "",
       fallback: "passthrough",
+      header_blacklist: "",
       rules: [],
     },
   },
@@ -857,7 +859,7 @@ function validateAndNormalizeConfigV1(configInput) {
       pushProblem(problems, path, "must be an object");
       return { enabled: direction === "inbound", defaultExpr: "", fallback: "passthrough", rules: [] };
     }
-    ensureNoUnknownKeys(src, new Set(["enabled", "defaultExpr", "fallback", "rules"]), path, problems);
+    ensureNoUnknownKeys(src, new Set(["enabled", "defaultExpr", "fallback", "rules", "header_blacklist"]), path, problems);
     const sectionEnabled = src.enabled === undefined ? (direction === "inbound") : src.enabled;
     if (typeof sectionEnabled !== "boolean") {
       pushProblem(problems, `${path}.enabled`, "must be a boolean");
@@ -883,6 +885,7 @@ function validateAndNormalizeConfigV1(configInput) {
       enabled: !!sectionEnabled,
       defaultExpr: typeof sectionDefaultExpr === "string" ? sectionDefaultExpr : "",
       fallback: VALID_FALLBACK_VALUES.has(sectionFallback) ? sectionFallback : "passthrough",
+      header_blacklist: typeof src.header_blacklist === "string" ? src.header_blacklist : (legacy?.header_blacklist || ""),
       rules: sectionRules,
     };
   }
@@ -2172,18 +2175,23 @@ function resolveUpstreamUrl(rawUrl, proxyHostHeader) {
 
 async function handleStatusPage(env, request) {
   ensureKvBinding(env);
-  const [proxyKey, adminKey] = await Promise.all([kvGetValue(env, KV_PROXY_KEY), kvGetValue(env, KV_ADMIN_KEY)]);
+  const [proxyKey, adminKey, config] = await Promise.all([
+    kvGetValue(env, KV_PROXY_KEY),
+    kvGetValue(env, KV_ADMIN_KEY),
+    loadConfigV1(env),
+  ]);
   const proxyInitialized = !!proxyKey;
   const adminInitialized = !!adminKey;
   if (!proxyInitialized || !adminInitialized) {
     return handleInitPage(env, request);
   }
   const docsUrl = getDocsBaseUrl(env);
+  const proxyName = String(config?.proxyName || "").trim();
 
   return new Response(
     htmlPage(
       "API Transform Proxy",
-      `${renderOnboardingHeader()}
+      `${renderOnboardingHeader(proxyName)}
        <h2 style="margin:0 0 10px 0;">Step 2 - View/Configure This Proxy</h2>
        ${renderAdminLoginOptions(docsUrl)}
        ${renderInitAdminLoginScript(ADMIN_ROOT)}`
@@ -2194,9 +2202,10 @@ async function handleStatusPage(env, request) {
 
 function handleVersion(env) {
   const version = String(env.BUILD_VERSION || "dev");
+  const buildTimestamp = String(env.BUILD_TIMESTAMP || env.BUILD_TIME || "");
   return jsonResponse(200, {
     ok: true,
-    data: { version },
+    data: { version, build_timestamp: buildTimestamp || null },
     meta: {},
   });
 }
@@ -2561,6 +2570,7 @@ async function handleTransformConfigPut(request, env) {
         enabled: inboundIn?.enabled === undefined ? !!currentTransform?.inbound?.enabled : !!inboundIn.enabled,
         defaultExpr: String(inboundIn?.defaultExpr ?? currentTransform?.inbound?.defaultExpr ?? ""),
         fallback: String(inboundIn?.fallback ?? currentTransform?.inbound?.fallback ?? "passthrough"),
+        header_blacklist: String(inboundIn?.header_blacklist ?? currentTransform?.inbound?.header_blacklist ?? ""),
         rules: inboundRules,
       },
     },
@@ -3229,6 +3239,13 @@ async function handleRequestCore(request, env, payload, ctx) {
   assertSafeUpstreamUrl(upstreamUrl, allowedHosts);
 
   const method = payload.upstream.method.toUpperCase();
+  const inboundHeaderBlacklist = String(
+    config?.transform?.inbound?.header_blacklist ?? ""
+  )
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const inboundHeaderBlacklistSet = new Set(inboundHeaderBlacklist);
 
   const upstreamHeaders = new Headers();
 
@@ -3236,6 +3253,7 @@ async function handleRequestCore(request, env, payload, ctx) {
   for (const [k, v] of request.headers.entries()) {
     const lk = k.toLowerCase();
     if (!shouldForwardIncomingHeader(lk, headerForwardingPolicy)) continue;
+    if (inboundHeaderBlacklistSet.has(lk)) continue;
     upstreamHeaders.set(k, v);
   }
 

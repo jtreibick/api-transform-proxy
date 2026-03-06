@@ -6,3 +6,6 @@ workers_dev = true
 # KV binding (no IDs) -> automatic provisioning on deploy (beta)
 [[kv_namespaces]]
 binding = "CONFIG"
+
+[vars]
+BUILD_TIMESTAMP = "dev"
