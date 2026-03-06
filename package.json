@@ -4,8 +4,7 @@
   "type": "module",
   "scripts": {
     "build:templates": "node scripts/build-templates.mjs",
-    "bootstrap:master-key": "bash scripts/bootstrap-master-key.sh",
-    "deploy:cf": "npm run bootstrap:master-key && npm exec wrangler deploy"
+    "deploy:cf": "npm exec wrangler deploy"
   },
   "devDependencies": {
     "wrangler": "^4.45.0"

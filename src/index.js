@@ -12,7 +12,6 @@ import {
 } from "./ui.js";
 import { createCloudflareStorage } from "./internal/cloudflare/storage/index.js";
 import { StorageConnectorError } from "./common/storage/interface.js";
-import { createEnvelopeCrypto } from "./common/crypto/envelope.js";
 
 /**
  * API transform relay for Bubble-style clients.
@@ -227,7 +226,6 @@ const DEFAULT_CONFIG_V1 = {
 let jsonataFactory = null;
 let yamlApi = null;
 let lastDebugTrace = null;
-const masterKeyCache = new WeakMap();
 
 export default {
   async fetch(request, env, ctx) {
@@ -235,9 +233,6 @@ export default {
     const normalizedPath = normalizePathname(pathname);
 
     try {
-      if (normalizedPath === "/" || normalizedPath.startsWith(RESERVED_ROOT)) {
-        await ensureMasterEncryptionKeyInitialized(env);
-      }
       if (normalizedPath === "/" && request.method === "GET") {
         if (request.headers.get("X-Proxy-Key")) {
           return await handleRootProxyRequest(request, env, ctx);
@@ -446,99 +441,12 @@ function kvStore(env) {
   return stateStore(env).keyValue;
 }
 
-function secretsStore(env) {
-  return stateStore(env).secrets;
-}
-
-function isEncryptedSecretKey(key) {
-  return key === KV_PROXY_KEY
-    || key === KV_ADMIN_KEY
-    || key === KV_ISSUER_KEY
-    || key === KV_PROXY_KEY_OLD
-    || key === KV_ADMIN_KEY_OLD
-    || key === KV_ISSUER_KEY_OLD
-    || key === KV_DEBUG_LOGGING_SECRET
-    || String(key || "").startsWith(KV_ENRICHED_HEADER_PREFIX);
-}
-
-function envelopeCrypto(env) {
-  return createEnvelopeCrypto({
-    env,
-    keyProvider: async () => {
-      return resolveMasterEncryptionKey(env);
-    },
-  });
-}
-
-async function ensureMasterEncryptionKeyInitialized(env) {
-  try {
-    await resolveMasterEncryptionKey(env);
-  } catch (e) {
-    throw mapCryptoError(e);
-  }
-}
-
-async function resolveMasterEncryptionKey(env) {
-  if (masterKeyCache.has(env)) return masterKeyCache.get(env);
-
-  const fromSecret = await secretsStore(env).get("MASTER_ENCRYPTION_KEY");
-  if (fromSecret) {
-    masterKeyCache.set(env, fromSecret);
-    return fromSecret;
-  }
-  const e = new Error("MASTER_ENCRYPTION_KEY is required for encrypted KV secrets.");
-  e.code = "MISSING_MASTER_ENCRYPTION_KEY";
-  throw e;
-}
-
-function mapCryptoError(error) {
-  if (error instanceof HttpError) return error;
-  const code = String(error?.code || "");
-  if (code === "MISSING_MASTER_ENCRYPTION_KEY") {
-    return new HttpError(
-      500,
-      "MISSING_MASTER_ENCRYPTION_KEY",
-      "MASTER_ENCRYPTION_KEY is not configured.",
-      {
-        setup: "Set MASTER_ENCRYPTION_KEY as a Cloudflare secret (32-byte base64 AES key).",
-      }
-    );
-  }
-  if (code === "INVALID_MASTER_ENCRYPTION_KEY") {
-    return new HttpError(
-      500,
-      "INVALID_MASTER_ENCRYPTION_KEY",
-      "MASTER_ENCRYPTION_KEY format is invalid.",
-      {
-        expected: "base64 for exactly 32 raw bytes (AES-256 key).",
-      }
-    );
-  }
-  if (code === "INVALID_ENCRYPTED_PAYLOAD") {
-    return new HttpError(500, "INVALID_ENCRYPTED_PAYLOAD", "Stored secret payload is corrupted.");
-  }
-  return error;
-}
-
 async function kvGetValue(env, key) {
-  const raw = await kvStore(env).get(key);
-  if (raw == null) return null;
-  if (!isEncryptedSecretKey(key)) return raw;
-  try {
-    return await envelopeCrypto(env).decryptMaybe(raw);
-  } catch (e) {
-    throw mapCryptoError(e);
-  }
+  return kvStore(env).get(key);
 }
 
 async function kvPutValue(env, key, value) {
-  if (!isEncryptedSecretKey(key)) return kvStore(env).put(key, value);
-  try {
-    const encrypted = await envelopeCrypto(env).encrypt(value);
-    return kvStore(env).put(key, encrypted);
-  } catch (e) {
-    throw mapCryptoError(e);
-  }
+  return kvStore(env).put(key, value);
 }
 
 function getAllowedHosts(env) {
