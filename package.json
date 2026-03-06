@@ -4,9 +4,11 @@
   "type": "module",
   "scripts": {
     "build:templates": "node scripts/build-templates.mjs",
-    "bootstrap:kv": "bash scripts/bootstrap-kv-config.sh",
     "bootstrap:master-key": "bash scripts/bootstrap-master-key.sh",
-    "deploy:cf": "npm run bootstrap:kv && npm run bootstrap:master-key && npm exec wrangler deploy"
+    "deploy:cf": "npm run bootstrap:master-key && npm exec wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.45.0"
   },
   "dependencies": {
     "jsonata": "^2.0.6",

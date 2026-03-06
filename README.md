@@ -202,17 +202,15 @@ Or use the helper script:
 npm run bootstrap:master-key
 ```
 
-One-command deploy (ensure KV + master key, then deploy):
+One-command deploy (ensure master key, then deploy):
 
 ```bash
 npm run deploy:cf
 ```
 
-KV bootstrap helper (creates CONFIG namespace if missing and updates `wrangler.toml`):
-
-```bash
-npm run bootstrap:kv
-```
+Wrangler-native KV provisioning:
+- Keep `[[kv_namespaces]]` with `binding = "CONFIG"` in `wrangler.toml` (no hard-coded id).
+- Use Wrangler v4.45+ (`npm exec wrangler deploy`), which provisions missing KV namespace resources during deploy.
 
 To rotate/overwrite the master key intentionally:
 
