@@ -163,11 +163,67 @@
           const prefix = text.trim().length ? 'proxyName: ' + value + '\n' : 'proxyName: ' + value + '\n';
           return prefix + text;
         }
+        function parseJwtEnabledFromYaml(yamlText) {
+          const text = String(yamlText || '');
+          const lines = text.split('\n');
+          let inJwt = false;
+          for (const line of lines) {
+            if (/^\S/.test(line)) {
+              if (line.startsWith('jwt:')) {
+                inJwt = true;
+                continue;
+              }
+              if (inJwt) break;
+            }
+            if (inJwt) {
+              const match = line.match(/^\s+enabled:\s*(true|false)\s*$/);
+              if (match) return match[1].toLowerCase() === 'true';
+            }
+          }
+          return false;
+        }
+        function applyJwtEnabledToYaml(yamlText, enabled) {
+          const value = enabled ? 'true' : 'false';
+          const text = String(yamlText || '');
+          const lines = text.split('\n');
+          let inJwt = false;
+          let jwtLineIndex = -1;
+          for (let i = 0; i < lines.length; i += 1) {
+            const line = lines[i];
+            if (/^\S/.test(line)) {
+              if (line.startsWith('jwt:')) {
+                inJwt = true;
+                jwtLineIndex = i;
+                continue;
+              }
+              if (inJwt) break;
+            }
+            if (inJwt) {
+              if (/^\s+enabled:\s*(true|false)\s*$/.test(line)) {
+                lines[i] = '  enabled: ' + value;
+                return lines.join('\n');
+              }
+            }
+          }
+          if (jwtLineIndex >= 0) {
+            const insertAt = jwtLineIndex + 1;
+            lines.splice(insertAt, 0, '  enabled: ' + value);
+            return lines.join('\n');
+          }
+          const prefix = text.trim().length ? 'jwt:\n  enabled: ' + value + '\n' : 'jwt:\n  enabled: ' + value + '\n';
+          return prefix + text;
+        }
         function updateProxyHeader(proxyName) {
           const host = window.location.host || '';
           const name = String(proxyName || '').trim();
           const subtitle = host + (name ? ' (' + name + ')' : '');
           if (el('proxy-subtitle')) el('proxy-subtitle').textContent = subtitle;
+          if (el('login-fqdn')) el('login-fqdn').textContent = host + (name ? ' (' + name + ')' : '');
+        }
+        function setJwtEnabled(enabled) {
+          const on = !!enabled;
+          if (el('jwt-enabled')) el('jwt-enabled').checked = on;
+          if (el('jwt-fields')) el('jwt-fields').style.display = on ? 'block' : 'none';
         }
         function openConfigTab() {
           document.querySelector('.tab-btn[data-tab="config"]')?.click();
@@ -235,20 +291,28 @@
               return;
             }
          }
-         function handleUnauthorized() {
-            currentKey = '';
-            try { sessionStorage.removeItem(ADMIN_ACCESS_TOKEN_STORAGE); } catch {}
-            if (el('admin-key')) el('admin-key').value = '';
-            if (el('admin-shell')) el('admin-shell').style.display = 'none';
-            if (el('admin-auth')) el('admin-auth').style.display = 'block';
-            showWarning('Session logged out. Provide admin key again to login.');
+        function handleUnauthorized() {
+           currentKey = '';
+           try { sessionStorage.removeItem(ADMIN_ACCESS_TOKEN_STORAGE); } catch {}
+           if (el('admin-key')) el('admin-key').value = '';
+           if (el('admin-shell')) el('admin-shell').style.display = 'none';
+           if (el('admin-auth')) el('admin-auth').style.display = 'block';
+           showWarning('Session logged out. Provide admin key again to login.');
          }
+        function logoutExplicit() {
+          currentKey = '';
+          try { sessionStorage.removeItem(ADMIN_ACCESS_TOKEN_STORAGE); } catch {}
+          if (el('admin-key')) el('admin-key').value = '';
+          if (el('admin-shell')) el('admin-shell').style.display = 'none';
+          if (el('admin-auth')) el('admin-auth').style.display = 'block';
+          showWarning('');
+        }
         async function apiCall(path, method, body, expectText) {
           if (!currentKey) {
             throw new Error('Login first.');
            }
            if (UI_DEBUG) {
-             const safeBody = (path.includes('/config') || typeof body === 'string') ? '(redacted)' : body;
+             const safeBody = (path.includes('/config') && method !== 'GET') || typeof body === 'string' ? '(redacted)' : body;
              console.log('[api]', method, path, safeBody === undefined ? '' : safeBody);
            }
            const headers = { 'Authorization': 'Bearer ' + currentKey };
@@ -302,7 +366,10 @@
               keyRotationLoad();
               keysRefresh();
             }
-             if (name === 'inbound-transform') transformConfigLoad();
+            if (name === 'jwt') {
+              keysRefresh();
+            }
+            if (name === 'inbound-transform') transformConfigLoad();
             if (name === 'sandbox') sandboxInit();
             currentTabName = name;
           }
@@ -332,8 +399,6 @@
             ? headers.enriched_headers
             : (Array.isArray(headers?.data?.enriched_headers) ? headers.data.enriched_headers : []);
           return '<div><b>Proxy Name:</b> ' + (proxyName || 'n/a') + '</div>'
-            + '<div><b>Build Version:</b> ' + versionText + '</div>'
-            + '<div><b>Last Deployed:</b> ' + (buildTimestamp || 'n/a') + '</div>'
             + '<div><b>Debug Enabled:</b> ' + (debugEnabled ? 'yes' : 'no') + '</div>'
             + '<div><b>Target URL:</b> ' + (targetHost || 'n/a') + '</div>'
             + '<div><b>Enrichments:</b> ' + (enrichedHeaders.length ? enrichedHeaders.join(', ') : 'n/a') + '</div>';
@@ -441,9 +506,6 @@
               setHtml('logging-status', html);
             }
             const ttlRemaining = Number.isFinite(Number(d.ttl_remaining_seconds)) ? Number(d.ttl_remaining_seconds) : null;
-            if (el('logging-ttl-remaining')) {
-              el('logging-ttl-remaining').textContent = ttlRemaining === null ? 'n/a' : String(ttlRemaining);
-            }
             if (el('logging-ttl-remaining-2')) {
               el('logging-ttl-remaining-2').textContent = ttlRemaining === null ? 'n/a' : String(ttlRemaining);
             }
@@ -454,8 +516,7 @@
             if (el('logging-config-enabled')) el('logging-config-enabled').checked = configEnabled;
             if (el('logging-config-fields')) el('logging-config-fields').style.display = configEnabled ? 'block' : 'none';
             if (el('logging-secret-wrap')) el('logging-secret-wrap').style.display = configEnabled ? 'block' : 'none';
-            const secretSet = !!secretStatus?.data?.logging_secret_set;
-            setOutput('logging-output', 'Logging secret set: ' + (secretSet ? 'yes' : 'no'));
+            if (el('logging-output')) el('logging-output').textContent = '';
           } catch (e) {
             setOutput('logging-output', String(e.message || e));
           }
@@ -463,8 +524,12 @@
         async function configLoad() {
           try {
             const text = await apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true);
+            if (UI_DEBUG) {
+              console.log('[config yaml]', text);
+            }
             if (el('config-yaml')) el('config-yaml').value = text;
             if (el('proxy-name')) el('proxy-name').value = parseProxyNameFromYaml(text);
+            setJwtEnabled(parseJwtEnabledFromYaml(text));
             updateProxyHeader(el('proxy-name')?.value || '');
             setConfigValidationError('');
             setConfigSaveEnabled(true);
@@ -601,8 +666,9 @@
             if (el('kr-proxy-expiry')) el('kr-proxy-expiry').value = d.proxy_expiry_seconds == null ? '' : String(d.proxy_expiry_seconds);
             if (el('kr-issuer-expiry')) el('kr-issuer-expiry').value = d.issuer_expiry_seconds == null ? '' : String(d.issuer_expiry_seconds);
             if (el('kr-admin-expiry')) el('kr-admin-expiry').value = d.admin_expiry_seconds == null ? '' : String(d.admin_expiry_seconds);
-            setOutput('kr-output', 'Outbound auth configuration loaded.');
+            if (el('kr-output')) el('kr-output').textContent = '';
             clearDirty('outbound-auth');
+            clearDirty('jwt');
           } catch (e) {
             setOutput('kr-output', String(e.message || e));
           }
@@ -661,7 +727,7 @@
               refresh_skew_seconds: Number(d.refresh_skew_seconds || 0),
               retry_once_on_401: !!d.retry_once_on_401,
               proxy_expiry_seconds: normalizeNullableIntegerInput(el('kr-proxy-expiry')?.value),
-              issuer_expiry_seconds: normalizeNullableIntegerInput(el('kr-issuer-expiry')?.value),
+              issuer_expiry_seconds: d.issuer_expiry_seconds ?? null,
               admin_expiry_seconds: d.admin_expiry_seconds ?? null,
               static_header_key: d.static_header_key ?? null,
               static_header_value: d.static_header_value ?? null,
@@ -714,6 +780,49 @@
             clearDirty('admin-auth');
           } catch (e) {
             setOutput('admin-keys-output', String(e.message || e));
+          }
+        }
+        async function jwtSave() {
+          try {
+            const yaml = await apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true);
+            const updatedYaml = applyJwtEnabledToYaml(yaml, !!el('jwt-enabled')?.checked);
+            const res = await fetch(ADMIN_ROOT + '/config', {
+              method: 'PUT',
+              headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'text/yaml' },
+              body: updatedYaml,
+            });
+            if (res.status === 401) {
+              handleUnauthorized();
+              throw new Error('Unauthorized (401)');
+            }
+            if (!res.ok) {
+              const text = await res.text();
+              throw new Error(text || 'Failed to save JWT settings');
+            }
+            const current = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'GET');
+            const d = current?.data || {};
+            const payload = {
+              enabled: !!d.enabled,
+              strategy: d.strategy || 'json_ttl',
+              request_yaml: d.request_yaml || '',
+              key_path: d.key_path || '',
+              ttl_path: d.ttl_path ?? null,
+              ttl_unit: d.ttl_unit || 'seconds',
+              expires_at_path: d.expires_at_path ?? null,
+              refresh_skew_seconds: Number(d.refresh_skew_seconds || 0),
+              retry_once_on_401: !!d.retry_once_on_401,
+              proxy_expiry_seconds: d.proxy_expiry_seconds ?? null,
+              issuer_expiry_seconds: normalizeNullableIntegerInput(el('kr-issuer-expiry')?.value),
+              admin_expiry_seconds: d.admin_expiry_seconds ?? null,
+              static_header_key: d.static_header_key ?? null,
+              static_header_value: d.static_header_value ?? null,
+            };
+            const out = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'PUT', payload);
+            setOutput('issuer-keys-output', out);
+            await keysRefresh();
+            clearDirty('jwt');
+          } catch (e) {
+            setOutput('issuer-keys-output', String(e.message || e));
           }
         }
          function setOutboundAuthEnabled(enabled) {
@@ -929,7 +1038,11 @@
             if (el('transform-global-enabled-inbound')) el('transform-global-enabled-inbound').checked = enabled;
             const outbound = d.outbound || {};
             const inbound = d.inbound || {};
-            if (el('inbound-header-blacklist')) el('inbound-header-blacklist').value = String(inbound?.header_blacklist || '');
+            if (el('inbound-header-filtering-mode')) el('inbound-header-filtering-mode').value = String(inbound?.header_filtering?.mode || 'blacklist');
+            if (el('inbound-header-filtering-names')) {
+              const names = Array.isArray(inbound?.header_filtering?.names) ? inbound.header_filtering.names.join(', ') : '';
+              el('inbound-header-filtering-names').value = names;
+            }
             if (el('outbound-default-expr')) el('outbound-default-expr').value = String(outbound.defaultExpr || '');
             if (el('outbound-fallback')) el('outbound-fallback').value = String(outbound.fallback || 'passthrough');
             if (el('inbound-default-expr')) el('inbound-default-expr').value = String(inbound.defaultExpr || '');
@@ -938,8 +1051,8 @@
             inboundRuleDrafts = Array.isArray(inbound.rules) ? inbound.rules.map(normalizeRuleForUi) : [];
             renderTransformRules('outbound');
             renderTransformRules('inbound');
-            setOutput('headers-output', 'Outbound transformations loaded.');
-            setOutput('inbound-transform-output', 'Inbound transformations loaded.');
+            if (el('headers-output')) el('headers-output').textContent = '';
+            if (el('inbound-transform-output')) el('inbound-transform-output').textContent = '';
             clearDirty('outbound-transform');
             clearDirty('inbound-transform');
           } catch (e) {
@@ -964,7 +1077,10 @@
                 enabled: true,
                 defaultExpr: el('inbound-default-expr')?.value || '',
                 fallback: el('inbound-fallback')?.value || 'passthrough',
-                header_blacklist: el('inbound-header-blacklist')?.value || '',
+                header_filtering: {
+                  mode: (el('inbound-header-filtering-mode')?.value || 'blacklist'),
+                  names: parseCsvList(el('inbound-header-filtering-names')?.value || ''),
+                },
                 rules: inboundRules,
               },
             };
@@ -1252,7 +1368,7 @@
                 + '<tbody>' + rows.join('') + '</tbody></table>'
               );
             }
-            setOutput('headers-output', 'Enrichments loaded.');
+            if (el('headers-output')) el('headers-output').textContent = '';
           } catch (e) {
             setOutput('headers-output', String(e.message || e));
           }
@@ -1353,20 +1469,24 @@
                if (!n) return 'n/a';
                try { return new Date(n).toLocaleString(); } catch { return 'n/a'; }
              };
-             const inboundHtml =
-               '<div><b>Proxy key</b></div>'
-               + '<div>Primary: ' + (proxy.primary_active ? 'active' : 'missing') + '</div>'
-               + '<div>Primary created: ' + formatCreatedAt(proxy.proxy_primary_key_created_at) + '</div>'
-               + '<div>Secondary overlap key: ' + (proxy.secondary_active ? 'active' : 'inactive') + '</div>'
-               + '<div>Secondary created: ' + formatCreatedAt(proxy.proxy_secondary_key_created_at) + '</div>'
-              + '<div>Expiry policy: ' + (proxy.expiry_seconds === null ? 'n/a' : String(proxy.expiry_seconds) + 's') + '</div>'
-               + '<hr style="margin:10px 0;border:none;border-top:1px solid #eee;" />'
-               + '<div><b>Target auth key</b></div>'
-               + '<div>Primary: ' + (issuer.primary_active ? 'active' : 'missing') + '</div>'
-               + '<div>Primary created: ' + formatCreatedAt(issuer.issuer_primary_key_created_at) + '</div>'
-               + '<div>Secondary overlap key: ' + (issuer.secondary_active ? 'active' : 'inactive') + '</div>'
-               + '<div>Secondary created: ' + formatCreatedAt(issuer.issuer_secondary_key_created_at) + '</div>'
+            const proxyHtml =
+              '<div><b>Proxy key</b></div>'
+              + '<div>Primary: ' + (proxy.primary_active ? 'active' : 'missing') + '</div>'
+              + '<div>Primary created: ' + formatCreatedAt(proxy.proxy_primary_key_created_at) + '</div>'
+              + '<div>Secondary overlap key: ' + (proxy.secondary_active ? 'active' : 'inactive') + '</div>'
+              + '<div>Secondary created: ' + formatCreatedAt(proxy.proxy_secondary_key_created_at) + '</div>'
+              + '<div>Expiry policy: ' + (proxy.expiry_seconds === null ? 'n/a' : String(proxy.expiry_seconds) + 's') + '</div>';
+            const issuerHtml =
+              '<div><b>Issuer key</b></div>'
+              + '<div>Primary: ' + (issuer.primary_active ? 'active' : 'missing') + '</div>'
+              + '<div>Primary created: ' + formatCreatedAt(issuer.issuer_primary_key_created_at) + '</div>'
+              + '<div>Secondary overlap key: ' + (issuer.secondary_active ? 'active' : 'inactive') + '</div>'
+              + '<div>Secondary created: ' + formatCreatedAt(issuer.issuer_secondary_key_created_at) + '</div>'
               + '<div>Expiry policy: ' + (issuer.expiry_seconds === null ? 'n/a' : String(issuer.expiry_seconds) + 's') + '</div>';
+            const inboundHtml =
+              proxyHtml
+              + '<hr style="margin:10px 0;border:none;border-top:1px solid #eee;" />'
+              + issuerHtml;
             const adminHtml =
               '<div><b>Admin key</b></div>'
                + '<div>Primary: ' + (admin.primary_active ? 'active' : 'missing') + '</div>'
@@ -1374,8 +1494,9 @@
                + '<div>Secondary overlap key: ' + (admin.secondary_active ? 'active' : 'inactive') + '</div>'
                + '<div>Secondary created: ' + formatCreatedAt(admin.admin_secondary_key_created_at) + '</div>'
               + '<div>Expiry policy: ' + (admin.expiry_seconds === null ? 'n/a' : String(admin.expiry_seconds) + 's') + '</div>';
-             if (el('keys-status-inbound')) setHtml('keys-status-inbound', inboundHtml);
-             if (el('keys-status-admin')) setHtml('keys-status-admin', adminHtml);
+            if (el('keys-status-inbound')) setHtml('keys-status-inbound', proxyHtml);
+            if (el('keys-status-admin')) setHtml('keys-status-admin', adminHtml);
+            if (el('keys-status-issuer')) setHtml('keys-status-issuer', issuerHtml);
            } catch (e) {
              setOutput('keys-output', String(e.message || e));
            }
@@ -1389,10 +1510,10 @@
          }
          async function rotateIssuer() {
            try {
-             setOutput('keys-output', await apiCall(ADMIN_ROOT + '/keys/issuer/rotate', 'POST'));
+             setOutput('issuer-keys-output', await apiCall(ADMIN_ROOT + '/keys/issuer/rotate', 'POST'));
              await keysRefresh();
            }
-           catch (e) { setOutput('keys-output', String(e.message || e)); }
+           catch (e) { setOutput('issuer-keys-output', String(e.message || e)); }
          }
         async function rotateAdmin() {
           try {
@@ -1407,9 +1528,10 @@
           }
         }
 
-        function bind() {
+         function bind() {
           attachTabs();
           updateProxyHeader('');
+          if (el('jwt-endpoint-url')) el('jwt-endpoint-url').value = window.location.origin + '/_apiproxy/jwt';
           document.querySelectorAll('.tab-panel').forEach((panel) => {
             const name = panel.id.replace('tab-', '');
             if (name === 'sandbox') return;
@@ -1456,6 +1578,10 @@
                showWarning(String(e.message || e));
              }
            });
+          el('logout-link')?.addEventListener('click', (evt) => {
+            evt.preventDefault();
+            logoutExplicit();
+          });
            el('overview-refresh-btn')?.addEventListener('click', refreshOverview);
           el('debug-refresh-trace-link')?.addEventListener('click', (evt) => {
             evt.preventDefault();
@@ -1480,7 +1606,6 @@
           el('logging-config-enabled')?.addEventListener('change', () => {
             const enabled = !!el('logging-config-enabled')?.checked;
             if (el('logging-config-fields')) el('logging-config-fields').style.display = enabled ? 'block' : 'none';
-            if (el('logging-secret-wrap')) el('logging-secret-wrap').style.display = enabled ? 'block' : 'none';
           });
            el('logging-open-config-link')?.addEventListener('click', (evt) => {
              evt.preventDefault();
@@ -1669,12 +1794,20 @@
             evt.preventDefault();
             keysRefresh();
           });
+          el('keys-refresh-link-issuer')?.addEventListener('click', (evt) => {
+            evt.preventDefault();
+            keysRefresh();
+          });
           el('keys-refresh-link-admin')?.addEventListener('click', (evt) => {
             evt.preventDefault();
             keysRefresh();
           });
           el('footer-save-inbound-auth')?.addEventListener('click', inboundAuthSave);
           el('footer-save-admin-auth')?.addEventListener('click', adminAuthSave);
+          el('footer-save-jwt')?.addEventListener('click', jwtSave);
+          el('jwt-enabled')?.addEventListener('change', () => {
+            setJwtEnabled(!!el('jwt-enabled')?.checked);
+          });
            el('rotate-proxy-btn')?.addEventListener('click', rotateProxy);
            el('rotate-issuer-btn')?.addEventListener('click', rotateIssuer);
            el('rotate-admin-btn')?.addEventListener('click', rotateAdmin);

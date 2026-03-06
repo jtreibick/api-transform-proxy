@@ -86,6 +86,9 @@ const EXPECTED_REQUEST_SCHEMA = {
 const CONFIG_SCHEMA_V1 = {
   targetHost: "string|null",
   proxyName: "string|null",
+  jwt: {
+    enabled: "boolean",
+  },
   apiKeyPolicy: {
     proxyExpirySeconds: "integer|null",
     issuerExpirySeconds: "integer|null",
@@ -134,7 +137,10 @@ const CONFIG_SCHEMA_V1 = {
       enabled: "boolean",
       defaultExpr: "string",
       fallback: "passthrough|error|transform_default",
-      header_blacklist: "comma-separated string",
+      header_filtering: {
+        mode: "blacklist|whitelist",
+        names: ["header-name"],
+      },
       rules: [
         {
           name: "string",
@@ -195,6 +201,9 @@ const BUILTIN_DEBUG_REDACT_HEADERS = new Set([
 const DEFAULT_CONFIG_V1 = {
   targetHost: null,
   proxyName: null,
+  jwt: {
+    enabled: false,
+  },
   apiKeyPolicy: {
     proxyExpirySeconds: null,
     issuerExpirySeconds: null,
@@ -243,7 +252,10 @@ const DEFAULT_CONFIG_V1 = {
       enabled: true,
       defaultExpr: "",
       fallback: "passthrough",
-      header_blacklist: "",
+      header_filtering: {
+        mode: "blacklist",
+        names: [],
+      },
       rules: [],
     },
   },
@@ -735,7 +747,7 @@ function validateAndNormalizeConfigV1(configInput) {
 
   ensureNoUnknownKeys(
     input,
-    new Set(["targetHost", "proxyName", "apiKeyPolicy", "targetCredentialRotation", "debug", "transform", "header_forwarding"]),
+    new Set(["targetHost", "proxyName", "jwt", "apiKeyPolicy", "targetCredentialRotation", "debug", "transform", "header_forwarding"]),
     "$",
     problems
   );
@@ -760,6 +772,18 @@ function validateAndNormalizeConfigV1(configInput) {
       const normalizedName = proxyNameRaw.trim();
       proxyName = normalizedName || null;
     }
+  }
+
+  const jwtIn = input.jwt ?? {};
+  if (!isNonArrayObject(jwtIn)) {
+    pushProblem(problems, "$.jwt", "must be an object when provided");
+  }
+  if (isNonArrayObject(jwtIn)) {
+    ensureNoUnknownKeys(jwtIn, new Set(["enabled"]), "$.jwt", problems);
+  }
+  const jwtEnabled = isNonArrayObject(jwtIn) && jwtIn.enabled !== undefined ? jwtIn.enabled : false;
+  if (typeof jwtEnabled !== "boolean") {
+    pushProblem(problems, "$.jwt.enabled", "must be a boolean");
   }
 
   const apiKeyPolicyIn = input.apiKeyPolicy ?? {};
@@ -859,7 +883,7 @@ function validateAndNormalizeConfigV1(configInput) {
       pushProblem(problems, path, "must be an object");
       return { enabled: direction === "inbound", defaultExpr: "", fallback: "passthrough", rules: [] };
     }
-    ensureNoUnknownKeys(src, new Set(["enabled", "defaultExpr", "fallback", "rules", "header_blacklist"]), path, problems);
+    ensureNoUnknownKeys(src, new Set(["enabled", "defaultExpr", "fallback", "rules", "header_filtering"]), path, problems);
     const sectionEnabled = src.enabled === undefined ? (direction === "inbound") : src.enabled;
     if (typeof sectionEnabled !== "boolean") {
       pushProblem(problems, `${path}.enabled`, "must be a boolean");
@@ -881,11 +905,21 @@ function validateAndNormalizeConfigV1(configInput) {
           .map((rule, index) => validateAndNormalizeTransformRule(rule, index, problems, path, direction))
           .filter((rule) => rule !== null)
       : [];
+    let headerFiltering = DEFAULT_CONFIG_V1.transform.inbound.header_filtering;
+    if (isNonArrayObject(src.header_filtering)) {
+      const hf = src.header_filtering;
+      ensureNoUnknownKeys(hf, new Set(["mode", "names"]), `${path}.header_filtering`, problems);
+      const mode = hf.mode === "whitelist" ? "whitelist" : "blacklist";
+      const names = Array.isArray(hf.names)
+        ? hf.names.map((n) => normalizeHeaderName(n)).filter(Boolean)
+        : [];
+      headerFiltering = { mode, names };
+    }
     return {
       enabled: !!sectionEnabled,
       defaultExpr: typeof sectionDefaultExpr === "string" ? sectionDefaultExpr : "",
       fallback: VALID_FALLBACK_VALUES.has(sectionFallback) ? sectionFallback : "passthrough",
-      header_blacklist: typeof src.header_blacklist === "string" ? src.header_blacklist : (legacy?.header_blacklist || ""),
+      header_filtering: headerFiltering,
       rules: sectionRules,
     };
   }
@@ -1014,6 +1048,9 @@ function validateAndNormalizeConfigV1(configInput) {
   return {
     targetHost,
     proxyName,
+    jwt: {
+      enabled: !!jwtEnabled,
+    },
     apiKeyPolicy: {
       proxyExpirySeconds,
       issuerExpirySeconds,
@@ -1300,6 +1337,19 @@ function getHeaderForwardingPolicy(config) {
   const names = Array.isArray(section.names)
     ? section.names.map((n) => normalizeHeaderName(n)).filter(Boolean)
     : DEFAULT_CONFIG_V1.header_forwarding.names;
+  return {
+    mode,
+    namesSet: new Set(names),
+  };
+}
+function getInboundHeaderFilteringPolicy(config) {
+  const inbound = isNonArrayObject(config?.transform?.inbound) ? config.transform.inbound : null;
+  const section = isNonArrayObject(inbound?.header_filtering) ? inbound.header_filtering : null;
+  if (!section) return getHeaderForwardingPolicy(config);
+  const mode = section.mode === "whitelist" ? "whitelist" : "blacklist";
+  const names = Array.isArray(section.names)
+    ? section.names.map((n) => normalizeHeaderName(n)).filter(Boolean)
+    : [];
   return {
     mode,
     namesSet: new Set(names),
@@ -2570,7 +2620,9 @@ async function handleTransformConfigPut(request, env) {
         enabled: inboundIn?.enabled === undefined ? !!currentTransform?.inbound?.enabled : !!inboundIn.enabled,
         defaultExpr: String(inboundIn?.defaultExpr ?? currentTransform?.inbound?.defaultExpr ?? ""),
         fallback: String(inboundIn?.fallback ?? currentTransform?.inbound?.fallback ?? "passthrough"),
-        header_blacklist: String(inboundIn?.header_blacklist ?? currentTransform?.inbound?.header_blacklist ?? ""),
+        header_filtering: isPlainObject(inboundIn?.header_filtering)
+          ? inboundIn.header_filtering
+          : (currentTransform?.inbound?.header_filtering ?? DEFAULT_CONFIG_V1.transform.inbound.header_filtering),
         rules: inboundRules,
       },
     },
@@ -3159,7 +3211,7 @@ async function handleRequestCore(request, env, payload, ctx) {
       }
     : null;
   const proxyHost = resolveProxyHostForRequest(request, config);
-  const headerForwardingPolicy = getHeaderForwardingPolicy(config);
+  const headerForwardingPolicy = getInboundHeaderFilteringPolicy(config);
 
   if (transformGlobalEnabled && outboundTransformConfig.enabled) {
     const outboundCtx = {
@@ -3239,13 +3291,6 @@ async function handleRequestCore(request, env, payload, ctx) {
   assertSafeUpstreamUrl(upstreamUrl, allowedHosts);
 
   const method = payload.upstream.method.toUpperCase();
-  const inboundHeaderBlacklist = String(
-    config?.transform?.inbound?.header_blacklist ?? ""
-  )
-    .split(",")
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-  const inboundHeaderBlacklistSet = new Set(inboundHeaderBlacklist);
 
   const upstreamHeaders = new Headers();
 
@@ -3253,7 +3298,6 @@ async function handleRequestCore(request, env, payload, ctx) {
   for (const [k, v] of request.headers.entries()) {
     const lk = k.toLowerCase();
     if (!shouldForwardIncomingHeader(lk, headerForwardingPolicy)) continue;
-    if (inboundHeaderBlacklistSet.has(lk)) continue;
     upstreamHeaders.set(k, v);
   }
 

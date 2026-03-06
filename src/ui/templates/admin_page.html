@@ -1,22 +1,23 @@
-       <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px;">
-         <img src="{{favicon_data_url}}" width="48" height="48" alt="API Transform Proxy icon" />
-         <div>
-           <h2 id="proxy-title" style="margin:0;font-size:20px;">API Transform Proxy</h2>
-           <h3 id="proxy-subtitle" style="margin:4px 0 0 0;font-size:14px;color:#475569;font-weight:600;"></h3>
-         </div>
-       </div>
-       <h1 style="margin:0 0 10px 0;font-size:30px;">Admin Console</h1>
-       <div id="admin-warning" style="display:none;padding:10px 12px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:8px;margin:10px 0;"></div>
        <div id="admin-auth" style="margin:12px 0;">
-         <label for="admin-key" style="display:block;font-weight:700;margin-bottom:6px;">Admin API Key</label>
+         <h3 id="login-fqdn" style="margin:0 0 10px 0;font-size:16px;color:#475569;font-weight:600;"></h3>
+         <label for="admin-key" style="display:block;font-weight:700;margin-bottom:6px;">Login with admin key</label>
          <input id="admin-key" type="password" placeholder="paste X-Admin-Key"
            style="width:100%;max-width:560px;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;" />
          <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
            <button type="button" id="login-btn"
              style="padding:8px 12px;border:1px solid #0f172a;border-radius:8px;background:#111827;color:#fff;cursor:pointer;">Login</button>
          </div>
+         <div id="admin-warning" style="display:none;padding:10px 12px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:8px;margin:10px 0;"></div>
        </div>
        <div id="admin-shell" style="display:none;">
+         <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px;">
+           <img src="{{favicon_data_url}}" width="48" height="48" alt="API Transform Proxy icon" />
+           <div>
+             <h2 id="proxy-title" style="margin:0;font-size:20px;">API Transform Proxy</h2>
+             <h3 id="proxy-subtitle" style="margin:4px 0 0 0;font-size:14px;color:#475569;font-weight:600;"></h3>
+           </div>
+         </div>
+         <h1 style="margin:0 0 10px 0;font-size:30px;">Admin Console</h1>
          <div style="display:flex;gap:14px;align-items:flex-start;margin:14px 0;">
          <div id="admin-nav" style="display:flex;flex-direction:column;gap:8px;min-width:220px;">
            <button type="button" class="tab-btn" data-tab="overview">Status</button>
@@ -31,7 +32,10 @@
            <div style="margin-top:6px;font-size:12px;color:#64748b;font-weight:700;text-transform:uppercase;">Inbound</div>
            <button type="button" class="tab-btn tab-child" data-tab="inbound-auth">Inbound Auth</button>
            <button type="button" class="tab-btn tab-child" data-tab="inbound-transform">Inbound Transformations</button>
+           <div style="margin-top:6px;font-size:12px;color:#64748b;font-weight:700;text-transform:uppercase;">JWT</div>
+           <button type="button" class="tab-btn tab-child" data-tab="jwt">JSON Web Token (JWT)</button>
            <button type="button" class="tab-btn" data-tab="config">Config</button>
+           <a href="#" id="logout-link" style="margin-top:14px;font-size:14px;color:#0f172a;text-decoration:underline;">Log out</a>
          </div>
          <div style="flex:1;min-width:0;">
          <div id="tab-overview" class="tab-panel">
@@ -42,7 +46,6 @@
         <div id="tab-debug" class="tab-panel" style="display:none;">
            <p><b>Logging controls</b></p>
            <div id="logging-status" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin:10px 0;">Loading logging status...</div>
-           <p style="margin-top:10px;margin-bottom:4px;">Logging TTL remaining (seconds): <span id="logging-ttl-remaining">0</span></p>
            <p style="margin-top:6px;margin-bottom:4px;">Logging expires in (seconds): <span id="logging-ttl-remaining-2">0</span> <a href="#" id="logging-ttl-refresh-link">refresh</a></p>
            <label for="logging-ttl-seconds" style="display:block;margin:8px 0 4px;">Logging TTL</label>
            <input id="logging-ttl-seconds" type="number" min="1" step="1" value="3600"
@@ -62,15 +65,15 @@
              <label for="logging-config-auth-header" style="display:block;margin:2px 0 4px;">Logging Auth Header</label>
              <input id="logging-config-auth-header" type="text" readonly
                style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;margin-bottom:8px;" />
-           </div>
-           <div id="logging-secret-wrap">
-             <label for="logging-secret" style="display:block;margin:2px 0 4px;">Logging auth secret</label>
-             <input id="logging-secret" type="password" placeholder="set logging auth secret"
-               style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
-             <p style="font-size:13px;color:#475569;margin:4px 0 0 0;">Logging secrets are managed via this API only and are not stored in YAML.</p>
+             <div id="logging-secret-wrap">
+               <label for="logging-secret" style="display:block;margin:2px 0 4px;">Logging auth secret</label>
+               <input id="logging-secret" type="password" placeholder="set logging auth secret"
+                 style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
+               <p style="font-size:13px;color:#475569;margin:4px 0 0 0;">Logging secrets are managed via this API only and are not stored in YAML.</p>
+             </div>
            </div>
            <div style="margin-top:10px;"></div>
-          <pre id="logging-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Logging output appears here.</pre>
+          <pre id="logging-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;"></pre>
           <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
             <button type="button" id="footer-save-logging" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
           </div>
@@ -159,7 +162,7 @@
            </div>
            </div>
            <div style="margin-top:10px;"></div>
-          <pre id="kr-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Key rotation output appears here.</pre>
+          <pre id="kr-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;"></pre>
           <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
             <button type="button" id="footer-save-outbound-auth" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
           </div>
@@ -213,9 +216,6 @@
            <label for="kr-proxy-expiry" style="display:block;margin:10px 0 4px;">Proxy Key Expiry Seconds</label>
            <input id="kr-proxy-expiry" type="text" placeholder="n/a"
              style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
-           <label for="kr-issuer-expiry" style="display:block;margin:10px 0 4px;">Target Auth Key Expiry Seconds</label>
-           <input id="kr-issuer-expiry" type="text" placeholder="n/a"
-             style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
            <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;"></div>
            <div style="display:flex;align-items:center;gap:8px;margin:10px 0 6px;">
              <b>Proxy Key Status</b>
@@ -224,9 +224,8 @@
            <div id="keys-status-inbound" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin-bottom:10px;">Key status will appear here.</div>
            <div style="display:flex;gap:8px;flex-wrap:wrap;">
              <button type="button" id="rotate-proxy-btn">Rotate proxy key</button>
-             <button type="button" id="rotate-issuer-btn">Rotate target auth key</button>
            </div>
-          <pre id="keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Rotation output appears here.</pre>
+          <pre id="keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;"></pre>
           <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
             <button type="button" id="footer-save-inbound-auth" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
           </div>
@@ -245,9 +244,36 @@
            <div style="display:flex;gap:8px;flex-wrap:wrap;">
              <button type="button" id="rotate-admin-btn">Rotate admin key</button>
            </div>
-          <pre id="admin-keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Admin rotation output appears here.</pre>
+          <pre id="admin-keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;"></pre>
           <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
             <button type="button" id="footer-save-admin-auth" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
+          </div>
+        </div>
+        <div id="tab-jwt" class="tab-panel" style="display:none;">
+          <p><b>JSON Web Token (JWT)</b></p>
+          <label style="display:flex;gap:8px;align-items:center;margin:8px 0 10px;">
+            <input id="jwt-enabled" type="checkbox" />
+            <span>Enable JWT Authentication</span>
+          </label>
+          <label for="jwt-endpoint-url" style="display:block;margin:8px 0 4px;">JWT Endpoint URL</label>
+          <input id="jwt-endpoint-url" type="text" readonly
+            style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;" />
+          <div id="jwt-fields" style="display:none;">
+            <label for="kr-issuer-expiry" style="display:block;margin:10px 0 4px;">Issuer Auth Key Expiry Seconds</label>
+            <input id="kr-issuer-expiry" type="text" placeholder="n/a"
+              style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+            <div style="display:flex;align-items:center;gap:8px;margin:10px 0 6px;">
+              <b>Issuer Key Status</b>
+              <a href="#" id="keys-refresh-link-issuer">refresh</a>
+            </div>
+            <div id="keys-status-issuer" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin-bottom:10px;">Issuer key status will appear here.</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button type="button" id="rotate-issuer-btn">Rotate issuer key</button>
+            </div>
+            <pre id="issuer-keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;"></pre>
+          </div>
+          <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
+            <button type="button" id="footer-save-jwt" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
           </div>
         </div>
         <div id="tab-inbound-transform" class="tab-panel" style="display:none;">
@@ -270,8 +296,13 @@
            <div style="margin-top:8px;">
              <button type="button" id="inbound-add-rule-btn">Add rule</button>
            </div>
-           <label for="inbound-header-blacklist" style="display:block;margin:12px 0 4px;">Header blacklist</label>
-           <input id="inbound-header-blacklist" type="text" placeholder="authorization, cookie"
+           <label for="inbound-header-filtering-mode" style="display:block;margin:12px 0 4px;">Header filtering</label>
+           <select id="inbound-header-filtering-mode" style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;">
+             <option value="blacklist">blacklist</option>
+             <option value="whitelist">whitelist</option>
+           </select>
+           <label for="inbound-header-filtering-names" style="display:block;margin:8px 0 4px;">Header list (comma-separated)</label>
+           <input id="inbound-header-filtering-names" type="text" placeholder="authorization, cookie"
              style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
            <div style="font-size:12px;color:#64748b;margin-top:4px;">These headers will not be forwarded in the request.</div>
            <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;"></div>

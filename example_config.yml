@@ -1,4 +1,7 @@
 targetHost: null
+proxyName: null
+jwt:
+  enabled: false
 apiKeyPolicy:
   proxyExpirySeconds: null
   issuerExpirySeconds: null
