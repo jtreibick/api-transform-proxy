@@ -85,6 +85,7 @@ const EXPECTED_REQUEST_SCHEMA = {
 // Step 1 contract freeze: root config schema (YAML externally, normalized JSON internally).
 const CONFIG_SCHEMA_V1 = {
   targetHost: "string|null",
+  proxyName: "string|null",
   apiKeyPolicy: {
     proxyExpirySeconds: "integer|null",
     issuerExpirySeconds: "integer|null",
@@ -124,7 +125,7 @@ const CONFIG_SCHEMA_V1 = {
           name: "string",
           method: ["GET", "POST"],
           path: ["/v1/*"],
-          headerMatch: { "x-example-header": "value-or-*contains*" },
+          headers: [{ name: "x-example-header", value: "value-or-*contains*" }],
           expr: "string",
         },
       ],
@@ -138,7 +139,7 @@ const CONFIG_SCHEMA_V1 = {
           name: "string",
           status: ["2xx", 422],
           type: "json|text|binary|any",
-          headerMatch: { "x-example-header": "value-or-*contains*" },
+          headers: [{ name: "x-example-header", value: "value-or-*contains*" }],
           expr: "string",
         },
       ],
@@ -192,6 +193,7 @@ const BUILTIN_DEBUG_REDACT_HEADERS = new Set([
 ]);
 const DEFAULT_CONFIG_V1 = {
   targetHost: null,
+  proxyName: null,
   apiKeyPolicy: {
     proxyExpirySeconds: null,
     issuerExpirySeconds: null,
@@ -590,14 +592,42 @@ function validateAndNormalizeStatusList(statusList, path, problems) {
   return normalized;
 }
 
-function validateAndNormalizeHeaderMatch(headerMatch, path, problems) {
+function validateAndNormalizeHeaderRules(headers, path, problems) {
+  if (headers === undefined) return undefined;
+  if (!Array.isArray(headers)) {
+    pushProblem(problems, path, "must be an array when provided");
+    return undefined;
+  }
+  const normalized = [];
+  for (let i = 0; i < headers.length; i += 1) {
+    const item = headers[i];
+    const itemPath = `${path}[${i}]`;
+    if (!isNonArrayObject(item)) {
+      pushProblem(problems, itemPath, "must be an object");
+      continue;
+    }
+    const name = normalizeHeaderName(item.name);
+    const value = typeof item.value === "string" ? item.value.trim() : "";
+    if (!name) {
+      pushProblem(problems, `${itemPath}.name`, "header name must be non-empty");
+      continue;
+    }
+    if (!value) {
+      pushProblem(problems, `${itemPath}.value`, "header match value must be a non-empty string");
+      continue;
+    }
+    normalized.push({ name, value });
+  }
+  return normalized.length ? normalized : undefined;
+}
+
+function normalizeLegacyHeaderMatch(headerMatch, path, problems) {
   if (headerMatch === undefined) return undefined;
   if (!isNonArrayObject(headerMatch)) {
     pushProblem(problems, path, "must be an object when provided");
     return undefined;
   }
-
-  const normalized = {};
+  const normalized = [];
   for (const [name, value] of Object.entries(headerMatch)) {
     const normalizedName = normalizeHeaderName(name);
     if (!normalizedName) {
@@ -608,9 +638,9 @@ function validateAndNormalizeHeaderMatch(headerMatch, path, problems) {
       pushProblem(problems, `${path}.${name}`, "header match value must be a non-empty string");
       continue;
     }
-    normalized[normalizedName] = value.trim();
+    normalized.push({ name: normalizedName, value: value.trim() });
   }
-  return normalized;
+  return normalized.length ? normalized : undefined;
 }
 
 function validateAndNormalizeTransformRule(rule, index, problems, sectionPath, direction) {
@@ -620,15 +650,15 @@ function validateAndNormalizeTransformRule(rule, index, problems, sectionPath, d
     return null;
   }
 
-  ensureNoUnknownKeys(rule, new Set(["name", "status", "type", "method", "path", "headerMatch", "expr"]), path, problems);
+  ensureNoUnknownKeys(rule, new Set(["name", "status", "type", "method", "path", "headers", "headerMatch", "expr"]), path, problems);
 
   const name = typeof rule.name === "string" ? rule.name.trim() : "";
   if (!name) pushProblem(problems, `${path}.name`, "must be a non-empty string");
 
-  const status = validateAndNormalizeStatusList(rule.status, `${path}.status`, problems);
+  const status = rule.status === undefined ? undefined : validateAndNormalizeStatusList(rule.status, `${path}.status`, problems);
 
   const type = typeof rule.type === "string" ? rule.type.trim().toLowerCase() : "";
-  if (!VALID_TRANSFORM_TYPES.has(type)) {
+  if (type && !VALID_TRANSFORM_TYPES.has(type)) {
     pushProblem(problems, `${path}.type`, "must be one of json, text, binary, any");
   }
 
@@ -637,7 +667,8 @@ function validateAndNormalizeTransformRule(rule, index, problems, sectionPath, d
     pushProblem(problems, `${path}.expr`, "must be a non-empty string");
   }
 
-  const headerMatch = validateAndNormalizeHeaderMatch(rule.headerMatch, `${path}.headerMatch`, problems);
+  const headers = validateAndNormalizeHeaderRules(rule.headers, `${path}.headers`, problems);
+  const legacyHeaders = headers ? undefined : normalizeLegacyHeaderMatch(rule.headerMatch, `${path}.headerMatch`, problems);
   const methodIn = rule.method;
   let method = undefined;
   if (methodIn !== undefined) {
@@ -676,10 +707,10 @@ function validateAndNormalizeTransformRule(rule, index, problems, sectionPath, d
   const normalized = {
     name,
     expr,
-    ...(headerMatch ? { headerMatch } : {}),
+    ...(headers ? { headers } : (legacyHeaders ? { headers: legacyHeaders } : {})),
   };
   if (direction === "inbound") {
-    normalized.status = status;
+    if (status && status.length > 0) normalized.status = status;
     normalized.type = type || "any";
   }
   if (direction === "outbound") {
@@ -702,7 +733,7 @@ function validateAndNormalizeConfigV1(configInput) {
 
   ensureNoUnknownKeys(
     input,
-    new Set(["targetHost", "apiKeyPolicy", "targetCredentialRotation", "debug", "transform", "header_forwarding"]),
+    new Set(["targetHost", "proxyName", "apiKeyPolicy", "targetCredentialRotation", "debug", "transform", "header_forwarding"]),
     "$",
     problems
   );
@@ -715,6 +746,17 @@ function validateAndNormalizeConfigV1(configInput) {
     } else {
       const normalizedTarget = targetHostRaw.trim();
       targetHost = normalizedTarget || null;
+    }
+  }
+
+  const proxyNameRaw = input.proxyName;
+  let proxyName = null;
+  if (proxyNameRaw !== undefined && proxyNameRaw !== null) {
+    if (typeof proxyNameRaw !== "string") {
+      pushProblem(problems, "$.proxyName", "must be a string or null");
+    } else {
+      const normalizedName = proxyNameRaw.trim();
+      proxyName = normalizedName || null;
     }
   }
 
@@ -968,6 +1010,7 @@ function validateAndNormalizeConfigV1(configInput) {
 
   return {
     targetHost,
+    proxyName,
     apiKeyPolicy: {
       proxyExpirySeconds,
       issuerExpirySeconds,
@@ -1590,11 +1633,13 @@ function ruleMatches(rule, ctx) {
     reasons.push("type");
   }
 
-  if (rule.headerMatch && isNonArrayObject(rule.headerMatch)) {
-    for (const [name, pattern] of Object.entries(rule.headerMatch)) {
-      const actual = ctx.headers[name.toLowerCase()] || "";
-      if (!headerMatchValue(actual, pattern)) {
-        reasons.push(`header:${name.toLowerCase()}`);
+  if (Array.isArray(rule.headers) && rule.headers.length > 0) {
+    for (const headerRule of rule.headers) {
+      const name = String(headerRule?.name || "").toLowerCase();
+      if (!name) continue;
+      const actual = ctx.headers[name] || "";
+      if (!headerMatchValue(actual, headerRule?.value)) {
+        reasons.push(`header:${name}`);
       }
     }
   }
@@ -2463,7 +2508,15 @@ function normalizeTransformRuleInput(rule, direction) {
     if (Array.isArray(rule.method)) out.method = rule.method.map((m) => String(m || "").toUpperCase()).filter(Boolean);
     if (Array.isArray(rule.path)) out.path = rule.path.map((p) => String(p || "")).filter(Boolean);
   }
-  if (isNonArrayObject(rule.headerMatch)) out.headerMatch = rule.headerMatch;
+  if (Array.isArray(rule.headers)) {
+    out.headers = rule.headers
+      .map((item) => ({ name: String(item?.name || "").toLowerCase(), value: String(item?.value || "") }))
+      .filter((item) => item.name && item.value);
+  } else if (isNonArrayObject(rule.headerMatch)) {
+    out.headers = Object.entries(rule.headerMatch)
+      .map(([name, value]) => ({ name: String(name || "").toLowerCase(), value: String(value || "") }))
+      .filter((item) => item.name && item.value);
+  }
   return out;
 }
 

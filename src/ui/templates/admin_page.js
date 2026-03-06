@@ -113,16 +113,43 @@
              msg.textContent = text;
            }
          }
-         function setConfigSaveEnabled(enabled) {
-           const btn = el('config-save-btn');
-           if (!btn) return;
-           btn.disabled = !enabled;
-           btn.style.opacity = enabled ? '1' : '0.5';
-           btn.style.cursor = enabled ? 'pointer' : 'not-allowed';
-         }
-         function openConfigTab() {
-           document.querySelector('.tab-btn[data-tab="config"]')?.click();
-         }
+        function setConfigSaveEnabled(enabled) {
+          const btn = el('config-save-btn');
+          if (!btn) return;
+          btn.disabled = !enabled;
+          btn.style.opacity = enabled ? '1' : '0.5';
+          btn.style.cursor = enabled ? 'pointer' : 'not-allowed';
+        }
+        function parseProxyNameFromYaml(yamlText) {
+          const text = String(yamlText || '');
+          const match = text.match(/^proxyName:\s*(.+)$/m);
+          if (!match) return '';
+          const raw = String(match[1] || '').trim();
+          if (!raw || raw.toLowerCase() === 'null') return '';
+          if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
+            return raw.slice(1, -1);
+          }
+          return raw;
+        }
+        function applyProxyNameToYaml(yamlText, proxyName) {
+          const name = String(proxyName || '').trim();
+          const value = name ? '"' + name.replace(/"/g, '\\"') + '"' : 'null';
+          const text = String(yamlText || '');
+          if (text.match(/^proxyName:\s*/m)) {
+            return text.replace(/^proxyName:\s*.*$/m, 'proxyName: ' + value);
+          }
+          const prefix = text.trim().length ? 'proxyName: ' + value + '\n' : 'proxyName: ' + value + '\n';
+          return prefix + text;
+        }
+        function updateProxyHeader(proxyName) {
+          const host = window.location.host || '';
+          const name = String(proxyName || '').trim();
+          const subtitle = host + (name ? ' (' + name + ')' : '');
+          if (el('proxy-subtitle')) el('proxy-subtitle').textContent = subtitle;
+        }
+        function openConfigTab() {
+          document.querySelector('.tab-btn[data-tab="config"]')?.click();
+        }
          function setOutboundMode(mode) {
            const m = String(mode || '').trim();
            const staticNode = el('outbound-static-fields');
@@ -233,14 +260,17 @@
                loadLoggingStatus();
              }
              if (name === 'outbound-auth') keyRotationLoad();
-             if (name === 'outbound-transform') {
-               transformConfigLoad();
-               headersList();
-             }
-             if (name === 'inbound-auth') {
-               keyRotationLoad();
-               keysRefresh();
-             }
+            if (name === 'outbound-transform') {
+              transformConfigLoad();
+              headersList();
+            }
+            if (name === 'admin-auth') {
+              keysRefresh();
+            }
+            if (name === 'inbound-auth') {
+              keyRotationLoad();
+              keysRefresh();
+            }
              if (name === 'inbound-transform') transformConfigLoad();
              if (name === 'sandbox') sandboxInit();
            }
@@ -299,17 +329,21 @@
          }
          async function debugEnable() {
            try {
-             setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug', 'PUT', { enabled: true }));
+             const ttl = Number(el('logging-ttl-seconds')?.value || 0);
+             if (!Number.isInteger(ttl) || ttl < 1) {
+               throw new Error('Logging TTL must be a positive integer.');
+             }
+             setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug', 'PUT', { enabled: true, ttl_seconds: ttl }));
              await loadLoggingStatus();
            }
-           catch (e) { setOutput('debug-output', String(e.message || e)); }
+           catch (e) { setOutput('logging-output', String(e.message || e)); }
          }
          async function debugDisable() {
            try {
              setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug', 'DELETE'));
              await loadLoggingStatus();
            }
-           catch (e) { setOutput('debug-output', String(e.message || e)); }
+           catch (e) { setOutput('logging-output', String(e.message || e)); }
          }
          async function debugLoadTrace() {
            try { setOutput('debug-output', await apiCall(ADMIN_ROOT + '/debug/last', 'GET', undefined, true)); }
@@ -358,34 +392,44 @@
              if (el('logging-config-url')) el('logging-config-url').value = endpointUrl;
              if (el('logging-config-auth-header')) el('logging-config-auth-header').value = endpointAuthHeader;
              const d = debugStatus?.data || {};
-             const statusHtml =
-               '<div><b>Debug enabled:</b> ' + (d.enabled ? 'yes' : 'no') + '</div>'
-               + '<div><b>Debug TTL remaining (seconds):</b> ' + Number(d.ttl_remaining_seconds || 0) + '</div>'
-               + '<div><b>Logging secret set:</b> ' + (secretStatus?.data?.logging_secret_set ? 'yes' : 'no') + '</div>';
-             setHtml('logging-status', statusHtml);
+             const enabledText = d.enabled ? 'yes' : 'no';
+             if (el('logging-status')) {
+               el('logging-status').textContent = 'Logging enabled: ' + enabledText;
+             }
+             if (el('logging-ttl-remaining')) {
+               el('logging-ttl-remaining').textContent = String(Number(d.ttl_remaining_seconds || 0));
+             }
+             if (el('logging-ttl-seconds') && Number(d.max_ttl_seconds || 0) > 0 && !el('logging-ttl-seconds').value) {
+               el('logging-ttl-seconds').value = String(Number(d.max_ttl_seconds));
+             }
+             const secretSet = !!secretStatus?.data?.logging_secret_set;
+             setOutput('logging-output', 'Logging secret set: ' + (secretSet ? 'yes' : 'no'));
            } catch (e) {
              setOutput('logging-output', String(e.message || e));
            }
          }
-         async function configLoad() {
-           try {
-             const text = await apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true);
-             if (el('config-yaml')) el('config-yaml').value = text;
-             setConfigValidationError('');
-             setConfigSaveEnabled(true);
-             setOutput('config-output', 'Config reloaded from proxy.');
-           } catch (e) {
-              setOutput('config-output', String(e.message || e));
-              setConfigSaveEnabled(false);
-           }
-         }
-         async function configValidate(showOutput) {
-           const yaml = el('config-yaml')?.value || '';
-           try {
-             const res = await fetch(ADMIN_ROOT + '/config/validate', {
-               method: 'POST',
-               headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'text/yaml' },
-               body: yaml,
+        async function configLoad() {
+          try {
+            const text = await apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true);
+            if (el('config-yaml')) el('config-yaml').value = text;
+            if (el('proxy-name')) el('proxy-name').value = parseProxyNameFromYaml(text);
+            updateProxyHeader(el('proxy-name')?.value || '');
+            setConfigValidationError('');
+            setConfigSaveEnabled(true);
+            setOutput('config-output', 'Config reloaded from proxy.');
+          } catch (e) {
+             setOutput('config-output', String(e.message || e));
+             setConfigSaveEnabled(false);
+          }
+        }
+        async function configValidate(showOutput) {
+          const yaml = applyProxyNameToYaml(el('config-yaml')?.value || '', el('proxy-name')?.value || '');
+          if (el('config-yaml')) el('config-yaml').value = yaml;
+          try {
+            const res = await fetch(ADMIN_ROOT + '/config/validate', {
+              method: 'POST',
+              headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'text/yaml' },
+              body: yaml,
              });
              if (res.status === 401) {
                handleUnauthorized();
@@ -417,12 +461,13 @@
              return false;
            }
          }
-         async function configSave() {
-           const yaml = el('config-yaml')?.value || '';
-           const valid = await configValidate(false);
-           if (!valid) {
-             setOutput('config-output', 'Save blocked: fix config validation errors first.');
-             return;
+        async function configSave() {
+          const yaml = applyProxyNameToYaml(el('config-yaml')?.value || '', el('proxy-name')?.value || '');
+          if (el('config-yaml')) el('config-yaml').value = yaml;
+          const valid = await configValidate(false);
+          if (!valid) {
+            setOutput('config-output', 'Save blocked: fix config validation errors first.');
+            return;
            }
            try {
              const res = await fetch(ADMIN_ROOT + '/config', {
@@ -538,123 +583,213 @@
              setOutput('kr-output', String(e.message || e));
            }
          }
-         async function inboundAuthSave() {
-           try {
-             const current = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'GET');
-             const d = current?.data || {};
-             const payload = {
-               enabled: !!d.enabled,
-               strategy: d.strategy || 'json_ttl',
-               request_yaml: d.request_yaml || '',
-               key_path: d.key_path || '',
-               ttl_path: d.ttl_path ?? null,
-               ttl_unit: d.ttl_unit || 'seconds',
-               expires_at_path: d.expires_at_path ?? null,
-               refresh_skew_seconds: Number(d.refresh_skew_seconds || 0),
-               retry_once_on_401: !!d.retry_once_on_401,
-               proxy_expiry_seconds: normalizeNullableIntegerInput(el('kr-proxy-expiry')?.value),
-               issuer_expiry_seconds: normalizeNullableIntegerInput(el('kr-issuer-expiry')?.value),
-               admin_expiry_seconds: normalizeNullableIntegerInput(el('kr-admin-expiry')?.value),
-               static_header_key: d.static_header_key ?? null,
-               static_header_value: d.static_header_value ?? null,
-             };
-             const out = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'PUT', payload);
-             setOutput('keys-output', out);
-             await keysRefresh();
-           } catch (e) {
-             setOutput('keys-output', String(e.message || e));
-           }
-         }
+        async function inboundAuthSave() {
+          try {
+            const current = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'GET');
+            const d = current?.data || {};
+            const payload = {
+              enabled: !!d.enabled,
+              strategy: d.strategy || 'json_ttl',
+              request_yaml: d.request_yaml || '',
+              key_path: d.key_path || '',
+              ttl_path: d.ttl_path ?? null,
+              ttl_unit: d.ttl_unit || 'seconds',
+              expires_at_path: d.expires_at_path ?? null,
+              refresh_skew_seconds: Number(d.refresh_skew_seconds || 0),
+              retry_once_on_401: !!d.retry_once_on_401,
+              proxy_expiry_seconds: normalizeNullableIntegerInput(el('kr-proxy-expiry')?.value),
+              issuer_expiry_seconds: normalizeNullableIntegerInput(el('kr-issuer-expiry')?.value),
+              admin_expiry_seconds: d.admin_expiry_seconds ?? null,
+              static_header_key: d.static_header_key ?? null,
+              static_header_value: d.static_header_value ?? null,
+            };
+            const out = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'PUT', payload);
+            setOutput('keys-output', out);
+            await keysRefresh();
+          } catch (e) {
+            setOutput('keys-output', String(e.message || e));
+          }
+        }
+        async function adminAuthSave() {
+          try {
+            const current = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'GET');
+            const d = current?.data || {};
+            const payload = {
+              enabled: !!d.enabled,
+              strategy: d.strategy || 'json_ttl',
+              request_yaml: d.request_yaml || '',
+              key_path: d.key_path || '',
+              ttl_path: d.ttl_path ?? null,
+              ttl_unit: d.ttl_unit || 'seconds',
+              expires_at_path: d.expires_at_path ?? null,
+              refresh_skew_seconds: Number(d.refresh_skew_seconds || 0),
+              retry_once_on_401: !!d.retry_once_on_401,
+              proxy_expiry_seconds: d.proxy_expiry_seconds ?? null,
+              issuer_expiry_seconds: d.issuer_expiry_seconds ?? null,
+              admin_expiry_seconds: normalizeNullableIntegerInput(el('kr-admin-expiry')?.value),
+              static_header_key: d.static_header_key ?? null,
+              static_header_value: d.static_header_value ?? null,
+            };
+            const out = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'PUT', payload);
+            setOutput('admin-keys-output', out);
+            await keysRefresh();
+          } catch (e) {
+            setOutput('admin-keys-output', String(e.message || e));
+          }
+        }
          function setOutboundAuthEnabled(enabled) {
            const on = !!enabled;
            if (el('outbound-auth-enabled')) el('outbound-auth-enabled').checked = on;
            if (el('outbound-auth-fields')) el('outbound-auth-fields').style.display = on ? 'block' : 'none';
          }
-         function emptyOutboundRule() {
-           return { name: '', method: ['GET'], path: ['/'], headerMatch: {}, expr: '' };
-         }
-         function emptyInboundRule() {
-           return { name: '', status: ['2xx'], type: 'json', headerMatch: {}, expr: '' };
-         }
-         function renderTransformRules(kind) {
-           const listId = kind === 'outbound' ? 'outbound-rules-list' : 'inbound-rules-list';
-           const rules = kind === 'outbound' ? outboundRuleDrafts : inboundRuleDrafts;
-           const node = el(listId);
-           if (!node) return;
-           if (!rules.length) {
+        function emptyOutboundRule() {
+          return { name: '', method: [], headers: [], expr: '' };
+        }
+        function emptyInboundRule() {
+          return { name: '', status: [], headers: [], expr: '' };
+        }
+        function normalizeRuleHeadersForUi(rule) {
+          const headers = [];
+          if (Array.isArray(rule?.headers)) {
+            rule.headers.forEach((item) => {
+              const name = String(item?.name || '').trim();
+              const value = String(item?.value || '').trim();
+              if (name && value) headers.push({ name, value });
+            });
+          } else if (rule?.headerMatch && typeof rule.headerMatch === 'object') {
+            for (const [name, value] of Object.entries(rule.headerMatch || {})) {
+              const n = String(name || '').trim();
+              const v = String(value || '').trim();
+              if (n && v) headers.push({ name: n, value: v });
+            }
+          }
+          return headers;
+        }
+        function normalizeRuleForUi(rule) {
+          const headers = normalizeRuleHeadersForUi(rule || {});
+          return { ...rule, headers };
+        }
+        function renderHeaderRows(kind, ruleIndex, headers) {
+          const safeHeaders = Array.isArray(headers) ? headers : [];
+          if (!safeHeaders.length) {
+            return '<div style="color:#64748b;margin:6px 0;">(no header matches)</div>';
+          }
+          return safeHeaders.map((h, j) => {
+            const name = htmlEscape(h?.name || '');
+            const value = htmlEscape(h?.value || '');
+            return '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0;">'
+              + '<input data-kind="' + kind + '" data-field="headerName" data-index="' + ruleIndex + '" data-header-index="' + j + '" value="' + name + '" placeholder="Header Name" style="width:100%;max-width:240px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
+              + '<input data-kind="' + kind + '" data-field="headerValue" data-index="' + ruleIndex + '" data-header-index="' + j + '" value="' + value + '" placeholder="Header Value" style="width:100%;max-width:320px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
+              + '<button type="button" class="rule-header-remove-btn" data-kind="' + kind + '" data-index="' + ruleIndex + '" data-header-index="' + j + '">Remove header match rule</button>'
+              + '</div>';
+          }).join('');
+        }
+        function renderTransformRules(kind) {
+          const listId = kind === 'outbound' ? 'outbound-rules-list' : 'inbound-rules-list';
+          const rules = kind === 'outbound' ? outboundRuleDrafts : inboundRuleDrafts;
+          const node = el(listId);
+          if (!node) return;
+          if (!rules.length) {
              node.innerHTML = '<div style="color:#64748b;">(no rules)</div>';
              return;
            }
-           node.innerHTML = rules.map((rule, i) => {
-             const method = Array.isArray(rule.method) ? rule.method.join(',') : '';
-             const path = Array.isArray(rule.path) ? rule.path.join(',') : '';
-             const status = Array.isArray(rule.status) ? rule.status.join(',') : '';
-             const headerMatch = JSON.stringify(rule.headerMatch || {}, null, 2);
-             const type = rule.type || 'any';
-             return '<div style="border:1px solid #e2e8f0;border-radius:8px;padding:10px;">'
-               + '<label style="display:block;margin:0 0 4px;">Name</label>'
-               + '<input data-kind="' + kind + '" data-field="name" data-index="' + i + '" value="' + htmlEscape(rule.name || '') + '" style="width:100%;max-width:460px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
-               + (kind === 'outbound'
-                   ? ('<label style="display:block;margin:8px 0 4px;">Method list (comma-separated)</label>'
-                     + '<input data-kind="' + kind + '" data-field="method" data-index="' + i + '" value="' + htmlEscape(method) + '" style="width:100%;max-width:460px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
-                     + '<label style="display:block;margin:8px 0 4px;">Path list (comma-separated)</label>'
-                     + '<input data-kind="' + kind + '" data-field="path" data-index="' + i + '" value="' + htmlEscape(path) + '" style="width:100%;max-width:460px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />')
-                   : ('<label style="display:block;margin:8px 0 4px;">Status list (comma-separated)</label>'
-                     + '<input data-kind="' + kind + '" data-field="status" data-index="' + i + '" value="' + htmlEscape(status) + '" style="width:100%;max-width:460px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
-                     + '<label style="display:block;margin:8px 0 4px;">Type</label>'
-                     + '<input data-kind="' + kind + '" data-field="type" data-index="' + i + '" value="' + htmlEscape(type) + '" style="width:100%;max-width:240px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'))
-               + '<label style="display:block;margin:8px 0 4px;">Header Match (JSON object)</label>'
-               + '<textarea data-kind="' + kind + '" data-field="headerMatch" data-index="' + i + '" rows="3" style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">' + htmlEscape(headerMatch) + '</textarea>'
-               + '<label style="display:block;margin:8px 0 4px;">JSONata Expression</label>'
-               + '<textarea data-kind="' + kind + '" data-field="expr" data-index="' + i + '" rows="4" style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">' + htmlEscape(rule.expr || '') + '</textarea>'
-               + '<div style="margin-top:8px;"><button type="button" class="rule-remove-btn" data-kind="' + kind + '" data-index="' + i + '">Remove rule</button></div>'
-               + '</div>';
-           }).join('');
-         }
+          node.innerHTML = rules.map((rule, i) => {
+            const method = Array.isArray(rule.method) ? rule.method.join(', ') : '';
+            const status = Array.isArray(rule.status) ? rule.status.join(', ') : '';
+            const headers = normalizeRuleHeadersForUi(rule);
+            const methodEnabled = Array.isArray(rule.method) && rule.method.length > 0;
+            const statusEnabled = Array.isArray(rule.status) && rule.status.length > 0;
+            const headersEnabled = headers.length > 0;
+            const methodTarget = 'rule-' + kind + '-' + i + '-method';
+            const statusTarget = 'rule-' + kind + '-' + i + '-status';
+            const headersTarget = 'rule-' + kind + '-' + i + '-headers';
+            return '<div style="border:1px solid #e2e8f0;border-radius:8px;padding:10px;">'
+              + '<label style="display:block;margin:0 0 4px;">Name</label>'
+              + '<input data-kind="' + kind + '" data-field="name" data-index="' + i + '" value="' + htmlEscape(rule.name || '') + '" style="width:100%;max-width:460px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
+              + '<label style="display:flex;gap:8px;align-items:center;margin:10px 0 6px;">'
+              + '<input type="checkbox" class="rule-match-toggle" data-kind="' + kind + '" data-index="' + i + '" data-target="' + methodTarget + '"' + (methodEnabled ? ' checked' : '') + ' />'
+              + '<span>Match On HTTP Method</span>'
+              + '</label>'
+              + '<div id="' + methodTarget + '" style="display:' + (methodEnabled ? 'block' : 'none') + ';">'
+              + '<label style="display:block;margin:6px 0 4px;">Method list (comma-separated)</label>'
+              + '<input data-kind="' + kind + '" data-field="method" data-index="' + i + '" value="' + htmlEscape(method) + '" style="width:100%;max-width:460px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
+              + '</div>'
+              + (kind === 'inbound'
+                ? ('<label style="display:flex;gap:8px;align-items:center;margin:10px 0 6px;">'
+                  + '<input type="checkbox" class="rule-match-toggle" data-kind="' + kind + '" data-index="' + i + '" data-target="' + statusTarget + '"' + (statusEnabled ? ' checked' : '') + ' />'
+                  + '<span>Match On HTTP Codes</span>'
+                  + '</label>'
+                  + '<div id="' + statusTarget + '" style="display:' + (statusEnabled ? 'block' : 'none') + ';">'
+                  + '<label style="display:block;margin:6px 0 4px;">Response code list (comma-separated)</label>'
+                  + '<input data-kind="' + kind + '" data-field="status" data-index="' + i + '" value="' + htmlEscape(status) + '" style="width:100%;max-width:460px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
+                  + '<div style="font-size:12px;color:#64748b;margin-top:4px;">Accepts mixed list of explicit http codes and classes "200, 301, 4xx, 5xx"</div>'
+                  + '</div>')
+                : '')
+              + '<label style="display:flex;gap:8px;align-items:center;margin:10px 0 6px;">'
+              + '<input type="checkbox" class="rule-match-toggle" data-kind="' + kind + '" data-index="' + i + '" data-target="' + headersTarget + '"' + (headersEnabled ? ' checked' : '') + ' />'
+              + '<span>Match On Header(s)</span>'
+              + '</label>'
+              + '<div id="' + headersTarget + '" style="display:' + (headersEnabled ? 'block' : 'none') + ';">'
+              + '<div style="margin:6px 0 4px;">List of headers</div>'
+              + renderHeaderRows(kind, i, headers)
+              + '<button type="button" class="rule-header-add-btn" data-kind="' + kind + '" data-index="' + i + '">Add header match rule</button>'
+              + '</div>'
+              + '<label style="display:block;margin:8px 0 4px;">JSONata Expression</label>'
+              + '<textarea data-kind="' + kind + '" data-field="expr" data-index="' + i + '" rows="4" style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">' + htmlEscape(rule.expr || '') + '</textarea>'
+              + '<div style="margin-top:8px;"><button type="button" class="rule-remove-btn" data-kind="' + kind + '" data-index="' + i + '">Remove rule</button></div>'
+              + '</div>';
+          }).join('');
+        }
          function parseCsvList(v) {
            return String(v || '').split(',').map((s) => s.trim()).filter(Boolean);
          }
-         function collectRuleDrafts(kind) {
-           const listId = kind === 'outbound' ? 'outbound-rules-list' : 'inbound-rules-list';
-           const rules = kind === 'outbound' ? outboundRuleDrafts : inboundRuleDrafts;
-           const node = el(listId);
-           if (!node) return rules;
-           const next = [];
-           for (let i = 0; i < rules.length; i += 1) {
-             const get = (field) => node.querySelector('[data-kind="' + kind + '"][data-field="' + field + '"][data-index="' + i + '"]');
-             const name = (get('name')?.value || '').trim();
-             const expr = get('expr')?.value || '';
-             if (!name || !expr.trim()) continue;
-             let headerMatch = {};
-             try {
-               const raw = get('headerMatch')?.value || '{}';
-               headerMatch = raw.trim() ? JSON.parse(raw) : {};
-             } catch {
-               throw new Error('Rule headerMatch must be valid JSON object.');
-             }
-             if (!headerMatch || typeof headerMatch !== 'object' || Array.isArray(headerMatch)) {
-               throw new Error('Rule headerMatch must be JSON object.');
-             }
-             if (kind === 'outbound') {
-               next.push({
-                 name,
-                 method: parseCsvList(get('method')?.value || ''),
-                 path: parseCsvList(get('path')?.value || ''),
-                 headerMatch,
-                 expr,
-               });
-             } else {
-               next.push({
-                 name,
-                 status: parseCsvList(get('status')?.value || ''),
-                 type: (get('type')?.value || 'any').trim().toLowerCase(),
-                 headerMatch,
-                 expr,
-               });
-             }
-           }
-           return next;
-         }
+        function collectRuleDrafts(kind) {
+          const listId = kind === 'outbound' ? 'outbound-rules-list' : 'inbound-rules-list';
+          const rules = kind === 'outbound' ? outboundRuleDrafts : inboundRuleDrafts;
+          const node = el(listId);
+          if (!node) return rules;
+          const next = [];
+          for (let i = 0; i < rules.length; i += 1) {
+            const get = (field) => node.querySelector('[data-kind="' + kind + '"][data-field="' + field + '"][data-index="' + i + '"]');
+            const getToggle = (targetId) => node.querySelector('.rule-match-toggle[data-kind="' + kind + '"][data-index="' + i + '"][data-target="' + targetId + '"]');
+            const name = (get('name')?.value || '').trim();
+            const expr = get('expr')?.value || '';
+            if (!name || !expr.trim()) continue;
+            const headers = [];
+            const headerEnabled = !!getToggle('rule-' + kind + '-' + i + '-headers')?.checked;
+            if (headerEnabled) {
+              const headerNodes = node.querySelectorAll('[data-kind="' + kind + '"][data-field="headerName"][data-index="' + i + '"]');
+              headerNodes.forEach((input) => {
+                const headerIndex = input.getAttribute('data-header-index');
+                const nameInput = input;
+                const valueInput = node.querySelector('[data-kind="' + kind + '"][data-field="headerValue"][data-index="' + i + '"][data-header-index="' + headerIndex + '"]');
+                const hName = String(nameInput?.value || '').trim();
+                const hValue = String(valueInput?.value || '').trim();
+                if (hName && hValue) headers.push({ name: hName, value: hValue });
+              });
+            }
+            if (kind === 'outbound') {
+              const methodEnabled = !!getToggle('rule-' + kind + '-' + i + '-method')?.checked;
+              const methodList = methodEnabled ? parseCsvList(get('method')?.value || '') : [];
+              next.push({
+                name,
+                ...(methodEnabled && methodList.length ? { method: methodList } : {}),
+                ...(headers.length ? { headers } : {}),
+                expr,
+              });
+            } else {
+              const statusEnabled = !!getToggle('rule-' + kind + '-' + i + '-status')?.checked;
+              const statusList = statusEnabled ? parseCsvList(get('status')?.value || '') : [];
+              next.push({
+                name,
+                ...(statusEnabled && statusList.length ? { status: statusList } : {}),
+                ...(headers.length ? { headers } : {}),
+                expr,
+              });
+            }
+          }
+          return next;
+        }
          async function transformConfigLoad() {
            try {
              const payload = await apiCall(ADMIN_ROOT + '/transform-config', 'GET');
@@ -668,8 +803,8 @@
              if (el('outbound-fallback')) el('outbound-fallback').value = String(outbound.fallback || 'passthrough');
              if (el('inbound-default-expr')) el('inbound-default-expr').value = String(inbound.defaultExpr || '');
              if (el('inbound-fallback')) el('inbound-fallback').value = String(inbound.fallback || 'passthrough');
-             outboundRuleDrafts = Array.isArray(outbound.rules) ? outbound.rules : [];
-             inboundRuleDrafts = Array.isArray(inbound.rules) ? inbound.rules : [];
+            outboundRuleDrafts = Array.isArray(outbound.rules) ? outbound.rules.map(normalizeRuleForUi) : [];
+            inboundRuleDrafts = Array.isArray(inbound.rules) ? inbound.rules.map(normalizeRuleForUi) : [];
              renderTransformRules('outbound');
              renderTransformRules('inbound');
              setOutput('headers-output', 'Outbound transformations loaded.');
@@ -679,7 +814,7 @@
              setOutput('inbound-transform-output', String(e.message || e));
            }
          }
-         async function saveTransformConfig(kind) {
+        async function saveTransformConfig(kind) {
            try {
              const globalEnabled = !!(el('transform-global-enabled-outbound')?.checked || el('transform-global-enabled-inbound')?.checked);
              const outboundRules = collectRuleDrafts('outbound');
@@ -706,7 +841,22 @@
            } catch (e) {
              if (kind === 'outbound') setOutput('headers-output', String(e.message || e));
              else setOutput('inbound-transform-output', String(e.message || e));
-           }
+        }
+        function addHeaderMatchRule(kind, ruleIndex) {
+          const rules = kind === 'outbound' ? outboundRuleDrafts : inboundRuleDrafts;
+          const rule = rules[ruleIndex];
+          if (!rule) return;
+          if (!Array.isArray(rule.headers)) rule.headers = [];
+          rule.headers.push({ name: '', value: '' });
+          renderTransformRules(kind);
+        }
+        function removeHeaderMatchRule(kind, ruleIndex, headerIndex) {
+          const rules = kind === 'outbound' ? outboundRuleDrafts : inboundRuleDrafts;
+          const rule = rules[ruleIndex];
+          if (!rule || !Array.isArray(rule.headers)) return;
+          rule.headers.splice(headerIndex, 1);
+          renderTransformRules(kind);
+        }
          }
          function sandboxPathToSuffix(path) {
            if (path === SANDBOX_API_PREFIX) return '';
@@ -1015,7 +1165,7 @@
                if (!n) return 'n/a';
                try { return new Date(n).toLocaleString(); } catch { return 'n/a'; }
              };
-             const html =
+             const inboundHtml =
                '<div><b>Proxy key</b></div>'
                + '<div>Primary: ' + (proxy.primary_active ? 'active' : 'missing') + '</div>'
                + '<div>Primary created: ' + formatCreatedAt(proxy.proxy_primary_key_created_at) + '</div>'
@@ -1028,15 +1178,16 @@
                + '<div>Primary created: ' + formatCreatedAt(issuer.issuer_primary_key_created_at) + '</div>'
                + '<div>Secondary overlap key: ' + (issuer.secondary_active ? 'active' : 'inactive') + '</div>'
                + '<div>Secondary created: ' + formatCreatedAt(issuer.issuer_secondary_key_created_at) + '</div>'
-               + '<div>Expiry policy: ' + (issuer.expiry_seconds === null ? 'null (long-lived)' : String(issuer.expiry_seconds) + 's') + '</div>'
-               + '<hr style="margin:10px 0;border:none;border-top:1px solid #eee;" />'
-               + '<div><b>Admin key</b></div>'
+               + '<div>Expiry policy: ' + (issuer.expiry_seconds === null ? 'null (long-lived)' : String(issuer.expiry_seconds) + 's') + '</div>';
+            const adminHtml =
+              '<div><b>Admin key</b></div>'
                + '<div>Primary: ' + (admin.primary_active ? 'active' : 'missing') + '</div>'
                + '<div>Primary created: ' + formatCreatedAt(admin.admin_primary_key_created_at) + '</div>'
                + '<div>Secondary overlap key: ' + (admin.secondary_active ? 'active' : 'inactive') + '</div>'
                + '<div>Secondary created: ' + formatCreatedAt(admin.admin_secondary_key_created_at) + '</div>'
                + '<div>Expiry policy: ' + (admin.expiry_seconds === null ? 'null (long-lived)' : String(admin.expiry_seconds) + 's') + '</div>';
-             setHtml('keys-status', html);
+             if (el('keys-status-inbound')) setHtml('keys-status-inbound', inboundHtml);
+             if (el('keys-status-admin')) setHtml('keys-status-admin', adminHtml);
            } catch (e) {
              setOutput('keys-output', String(e.message || e));
            }
@@ -1055,21 +1206,23 @@
            }
            catch (e) { setOutput('keys-output', String(e.message || e)); }
          }
-         async function rotateAdmin() {
-           try {
-             const out = await apiCall(ADMIN_ROOT + '/keys/admin/rotate', 'POST');
-             setOutput('keys-output', out);
-             await keysRefresh();
-             setCurrentKey('');
-             showWarning('Admin key rotated. Re-enter the new admin key from response.');
-           } catch (e) {
-             setOutput('keys-output', String(e.message || e));
-           }
-         }
+        async function rotateAdmin() {
+          try {
+            const out = await apiCall(ADMIN_ROOT + '/keys/admin/rotate', 'POST');
+            setOutput('keys-output', out);
+            setOutput('admin-keys-output', out);
+            await keysRefresh();
+            setCurrentKey('');
+            showWarning('Admin key rotated. Re-enter the new admin key from response.');
+          } catch (e) {
+            setOutput('keys-output', String(e.message || e));
+          }
+        }
 
-         function bind() {
-           attachTabs();
-           el('login-btn')?.addEventListener('click', async () => {
+        function bind() {
+          attachTabs();
+          updateProxyHeader('');
+          el('login-btn')?.addEventListener('click', async () => {
              const adminKey = readKeyInput();
              if (!adminKey) {
                showWarning('Enter an admin key first.');
@@ -1093,17 +1246,17 @@
                setCurrentKey(token);
                showWarning('');
                try {
-                 await refreshOverview();
-                 await debugLoadTrace();
-                 await loadLoggingStatus();
-                 await configLoad();
-                 await keyRotationLoad();
-                 await transformConfigLoad();
-                 await headersList();
-                 await keysRefresh();
-               } catch {
-                 // no-op
-               }
+                await refreshOverview();
+                await debugLoadTrace();
+                await loadLoggingStatus();
+                await configLoad();
+                await keyRotationLoad();
+                await transformConfigLoad();
+                await headersList();
+                await keysRefresh();
+              } catch {
+                // no-op
+              }
              } catch (e) {
                showWarning(String(e.message || e));
              }
@@ -1146,12 +1299,17 @@
            el('outbound-mode')?.addEventListener('change', () => {
              setOutboundMode(el('outbound-mode')?.value || 'autorotation');
            });
-           el('config-yaml')?.addEventListener('input', () => {
-             setConfigSaveEnabled(false);
-             if (configValidateTimer) clearTimeout(configValidateTimer);
-             configValidateTimer = setTimeout(() => { configValidate(false); }, 350);
-           });
-           el('config-yaml')?.addEventListener('blur', () => configValidate(true));
+          el('config-yaml')?.addEventListener('input', () => {
+            setConfigSaveEnabled(false);
+            if (configValidateTimer) clearTimeout(configValidateTimer);
+            configValidateTimer = setTimeout(() => { configValidate(false); }, 350);
+          });
+          el('config-yaml')?.addEventListener('blur', () => configValidate(true));
+          el('proxy-name')?.addEventListener('input', () => {
+            updateProxyHeader(el('proxy-name')?.value || '');
+            setConfigSaveEnabled(false);
+          });
+          el('proxy-name')?.addEventListener('blur', () => configValidate(true));
            el('headers-save-btn')?.addEventListener('click', headersSave);
            el('header-value-toggle-btn')?.addEventListener('click', (evt) => {
              evt.preventDefault();
@@ -1171,24 +1329,42 @@
              inboundRuleDrafts.push(emptyInboundRule());
              renderTransformRules('inbound');
            });
-           el('outbound-rules-list')?.addEventListener('click', (evt) => {
-             const btn = evt.target?.closest ? evt.target.closest('.rule-remove-btn') : null;
-             if (!btn || btn.getAttribute('data-kind') !== 'outbound') return;
-             const idx = Number(btn.getAttribute('data-index') || -1);
-             if (idx >= 0) {
-               outboundRuleDrafts.splice(idx, 1);
-               renderTransformRules('outbound');
-             }
-           });
-           el('inbound-rules-list')?.addEventListener('click', (evt) => {
-             const btn = evt.target?.closest ? evt.target.closest('.rule-remove-btn') : null;
-             if (!btn || btn.getAttribute('data-kind') !== 'inbound') return;
-             const idx = Number(btn.getAttribute('data-index') || -1);
-             if (idx >= 0) {
-               inboundRuleDrafts.splice(idx, 1);
-               renderTransformRules('inbound');
-             }
-           });
+          function handleRuleListClick(kind, evt) {
+            const removeRuleBtn = evt.target?.closest ? evt.target.closest('.rule-remove-btn') : null;
+            if (removeRuleBtn && removeRuleBtn.getAttribute('data-kind') === kind) {
+              const idx = Number(removeRuleBtn.getAttribute('data-index') || -1);
+              if (idx >= 0) {
+                if (kind === 'outbound') outboundRuleDrafts.splice(idx, 1);
+                else inboundRuleDrafts.splice(idx, 1);
+                renderTransformRules(kind);
+              }
+              return;
+            }
+            const addHeaderBtn = evt.target?.closest ? evt.target.closest('.rule-header-add-btn') : null;
+            if (addHeaderBtn && addHeaderBtn.getAttribute('data-kind') === kind) {
+              const idx = Number(addHeaderBtn.getAttribute('data-index') || -1);
+              if (idx >= 0) addHeaderMatchRule(kind, idx);
+              return;
+            }
+            const removeHeaderBtn = evt.target?.closest ? evt.target.closest('.rule-header-remove-btn') : null;
+            if (removeHeaderBtn && removeHeaderBtn.getAttribute('data-kind') === kind) {
+              const idx = Number(removeHeaderBtn.getAttribute('data-index') || -1);
+              const hIdx = Number(removeHeaderBtn.getAttribute('data-header-index') || -1);
+              if (idx >= 0 && hIdx >= 0) removeHeaderMatchRule(kind, idx, hIdx);
+            }
+          }
+          el('outbound-rules-list')?.addEventListener('click', (evt) => handleRuleListClick('outbound', evt));
+          el('inbound-rules-list')?.addEventListener('click', (evt) => handleRuleListClick('inbound', evt));
+          function handleRuleToggle(evt) {
+            const toggle = evt.target;
+            if (!toggle || !toggle.classList || !toggle.classList.contains('rule-match-toggle')) return;
+            const targetId = toggle.getAttribute('data-target');
+            if (!targetId) return;
+            const panel = document.getElementById(targetId);
+            if (panel) panel.style.display = toggle.checked ? 'block' : 'none';
+          }
+          el('outbound-rules-list')?.addEventListener('change', handleRuleToggle);
+          el('inbound-rules-list')?.addEventListener('change', handleRuleToggle);
            el('outbound-transform-save-btn')?.addEventListener('click', () => saveTransformConfig('outbound'));
            el('inbound-transform-save-btn')?.addEventListener('click', () => saveTransformConfig('inbound'));
            el('transform-global-enabled-outbound')?.addEventListener('change', () => {
@@ -1204,8 +1380,10 @@
              el('delete-header-modal')?.close();
            });
            el('delete-header-confirm-btn')?.addEventListener('click', headersDeleteConfirmed);
-           el('keys-refresh-btn')?.addEventListener('click', keysRefresh);
-           el('inbound-save-btn')?.addEventListener('click', inboundAuthSave);
+          el('keys-refresh-btn')?.addEventListener('click', keysRefresh);
+          el('admin-keys-refresh-btn')?.addEventListener('click', keysRefresh);
+          el('inbound-save-btn')?.addEventListener('click', inboundAuthSave);
+          el('admin-save-btn')?.addEventListener('click', adminAuthSave);
            el('rotate-proxy-btn')?.addEventListener('click', rotateProxy);
            el('rotate-issuer-btn')?.addEventListener('click', rotateIssuer);
            el('rotate-admin-btn')?.addEventListener('click', rotateAdmin);

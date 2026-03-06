@@ -1,5 +1,9 @@
-<div style="margin-bottom:10px;">
+       <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px;">
          <img src="{{favicon_data_url}}" width="48" height="48" alt="API Transform Proxy icon" />
+         <div>
+           <h2 id="proxy-title" style="margin:0;font-size:20px;">API Transform Proxy</h2>
+           <h3 id="proxy-subtitle" style="margin:4px 0 0 0;font-size:14px;color:#475569;font-weight:600;"></h3>
+         </div>
        </div>
        <h1 style="margin:0 0 10px 0;font-size:30px;">Admin Console</h1>
        <div id="admin-warning" style="display:none;padding:10px 12px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:8px;margin:10px 0;"></div>
@@ -16,14 +20,17 @@
          <div style="display:flex;gap:14px;align-items:flex-start;margin:14px 0;">
          <div id="admin-nav" style="display:flex;flex-direction:column;gap:8px;min-width:220px;">
            <button type="button" class="tab-btn" data-tab="overview">Status</button>
-           <button type="button" class="tab-btn" data-tab="debug">Logging</button>
+           <div style="margin-top:6px;font-size:12px;color:#64748b;font-weight:700;text-transform:uppercase;">Observability &amp; Testing</div>
+           <button type="button" class="tab-btn tab-child" data-tab="debug">Logging</button>
+           <button type="button" class="tab-btn tab-child" data-tab="sandbox">API Sandbox</button>
+           <div style="margin-top:6px;font-size:12px;color:#64748b;font-weight:700;text-transform:uppercase;">Admin</div>
+           <button type="button" class="tab-btn tab-child" data-tab="admin-auth">Admin Auth</button>
            <div style="margin-top:6px;font-size:12px;color:#64748b;font-weight:700;text-transform:uppercase;">Outbound</div>
            <button type="button" class="tab-btn tab-child" data-tab="outbound-auth">Outbound Auth</button>
            <button type="button" class="tab-btn tab-child" data-tab="outbound-transform">Outbound Transformations</button>
            <div style="margin-top:6px;font-size:12px;color:#64748b;font-weight:700;text-transform:uppercase;">Inbound</div>
            <button type="button" class="tab-btn tab-child" data-tab="inbound-auth">Inbound Auth</button>
            <button type="button" class="tab-btn tab-child" data-tab="inbound-transform">Inbound Transformations</button>
-           <button type="button" class="tab-btn" data-tab="sandbox">API Sandbox</button>
            <button type="button" class="tab-btn" data-tab="config">Config</button>
          </div>
          <div style="flex:1;min-width:0;">
@@ -34,34 +41,39 @@
          </div>
          <div id="tab-debug" class="tab-panel" style="display:none;">
            <p><b>Logging controls</b></p>
-           <p style="margin-top:16px;"><b>Logging configuration (read-only)</b></p>
-           <label for="logging-config-url" style="display:block;margin:8px 0 4px;">Logging Endpoint URL (YAML config, <a href="#" id="logging-open-config-link-label">go to config</a>)</label>
+           <div id="logging-status" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin:10px 0;">Logging enabled: no</div>
+           <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+             <button type="button" id="debug-enable-btn">Enable Logging</button>
+             <button type="button" id="debug-disable-btn">Disable Logging</button>
+           </div>
+           <p style="margin-top:10px;margin-bottom:4px;">Logging TTL remaining (seconds): <span id="logging-ttl-remaining">0</span></p>
+           <label for="logging-ttl-seconds" style="display:block;margin:8px 0 4px;">Logging TTL</label>
+           <input id="logging-ttl-seconds" type="number" min="1" step="1" value="3600"
+             style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+           <p style="margin-top:12px;margin-bottom:6px;">Logging output appears here.</p>
+           <pre id="debug-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;">Debug output appears here.</pre>
+           <p style="margin-top:10px;"><a href="#" id="debug-refresh-trace-link">Refresh last trace</a></p>
+           <p style="margin-top:16px;"><b>Logging configuration</b></p>
+           <label for="logging-config-url" style="display:block;margin:8px 0 4px;">Logging Endpoint URL</label>
            <input id="logging-config-url" type="text" readonly
              style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;margin-bottom:8px;" />
-           <label for="logging-config-auth-header" style="display:block;margin:2px 0 4px;">Logging Auth Header (YAML config, <a href="#" id="logging-open-config-link-header">go to config</a>)</label>
+           <label for="logging-config-auth-header" style="display:block;margin:2px 0 4px;">Logging Auth Header</label>
            <input id="logging-config-auth-header" type="text" readonly
              style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;margin-bottom:8px;" />
-           <p style="font-size:13px;color:#475569;margin:6px 0 0 0;">To modify logging URL/header, update YAML config under <code>debug.loggingEndpoint</code>. <a href="#" id="logging-open-config-link">Go to config</a></p>
-           <p style="font-size:13px;color:#475569;margin:4px 0 0 0;">Logging secrets are managed via this API only and are not stored in YAML.</p>
-           <div id="logging-status" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin:10px 0;">Loading logging status...</div>
-           <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
-             <button type="button" id="debug-enable-btn">Enable debug</button>
-             <button type="button" id="debug-disable-btn">Disable debug</button>
-           </div>
-           <pre id="logging-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Logging output appears here.</pre>
-           <p style="margin-top:10px;"><a href="#" id="debug-refresh-trace-link">Refresh last trace</a></p>
-           <pre id="debug-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;">Debug output appears here.</pre>
-           <p style="margin-top:16px;"><b>Logging auth secret</b></p>
-           <label for="logging-secret" style="display:block;margin:8px 0 4px;">Secret value</label>
+           <label for="logging-secret" style="display:block;margin:2px 0 4px;">Logging auth secret</label>
            <input id="logging-secret" type="password" placeholder="set logging auth secret"
              style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
-           <div style="display:flex;gap:8px;flex-wrap:wrap;">
-             <button type="button" id="logging-secret-save-btn">Save/Update secret</button>
-             <button type="button" id="logging-secret-delete-btn">Delete secret</button>
+           <p style="font-size:13px;color:#475569;margin:4px 0 0 0;">Logging secrets are managed via this API only and are not stored in YAML.</p>
+           <div style="margin-top:10px;">
+             <button type="button" id="logging-secret-save-btn">Save</button>
            </div>
+           <pre id="logging-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Logging output appears here.</pre>
          </div>
          <div id="tab-config" class="tab-panel" style="display:none;">
            <p><b>YAML config</b></p>
+           <label for="proxy-name" style="display:block;margin:8px 0 4px;">Proxy name</label>
+           <input id="proxy-name" type="text" placeholder="friendly name"
+             style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
            <textarea id="config-yaml" rows="14"
              style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"></textarea>
            <p id="config-validation-error" style="display:none;margin:6px 0 0;color:#b91c1c;font-size:14px;"></p>
@@ -191,20 +203,31 @@
            <label for="kr-issuer-expiry" style="display:block;margin:10px 0 4px;">Target Auth Key Expiry Seconds</label>
            <input id="kr-issuer-expiry" type="text" value="null"
              style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
-           <label for="kr-admin-expiry" style="display:block;margin:10px 0 4px;">Admin Key Expiry Seconds</label>
-           <input id="kr-admin-expiry" type="text" value="null"
-             style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
            <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
              <button type="button" id="inbound-save-btn">Save</button>
            </div>
-           <div id="keys-status" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin-bottom:10px;">Key status will appear here.</div>
+           <div id="keys-status-inbound" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin-bottom:10px;">Key status will appear here.</div>
            <div style="display:flex;gap:8px;flex-wrap:wrap;">
              <button type="button" id="keys-refresh-btn">Refresh key status</button>
              <button type="button" id="rotate-proxy-btn">Rotate proxy key</button>
              <button type="button" id="rotate-issuer-btn">Rotate target auth key</button>
-             <button type="button" id="rotate-admin-btn">Rotate admin key</button>
            </div>
            <pre id="keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Rotation output appears here.</pre>
+         </div>
+         <div id="tab-admin-auth" class="tab-panel" style="display:none;">
+           <p><b>Admin Auth</b></p>
+           <label for="kr-admin-expiry" style="display:block;margin:10px 0 4px;">Admin Key Expiry Seconds</label>
+           <input id="kr-admin-expiry" type="text" value="null"
+             style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+           <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+             <button type="button" id="admin-save-btn">Save</button>
+           </div>
+           <div id="keys-status-admin" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin-bottom:10px;">Admin key status will appear here.</div>
+           <div style="display:flex;gap:8px;flex-wrap:wrap;">
+             <button type="button" id="admin-keys-refresh-btn">Refresh admin key status</button>
+             <button type="button" id="rotate-admin-btn">Rotate admin key</button>
+           </div>
+           <pre id="admin-keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Admin rotation output appears here.</pre>
          </div>
          <div id="tab-inbound-transform" class="tab-panel" style="display:none;">
            <p><b>Inbound Transformations</b></p>
