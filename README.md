@@ -132,6 +132,7 @@ header_forwarding:
 - `CONFIG` KV binding must exist and be bound in `wrangler.toml`.
 - `jsonata` and `yaml` must be installed from `package.json` dependencies.
 - Optional: set `BOOTSTRAP_CONFIG_YAML` to define config from env. When set, it overrides KV config.
+- Required: set `MASTER_ENCRYPTION_KEY` as a Worker secret (base64 for exactly 32 raw bytes).
 - Optional: `debug.max_debug_session_seconds` controls debug-window max duration; default `3600`, max `604800`.
 - Debug traces always redact: `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-proxy-key`, `x-admin-key`.
 - Optional: set `BOOTSTRAP_ENRICHED_HEADERS_JSON` to define enriched headers from deploy config.
@@ -187,6 +188,18 @@ Example:
 ```bash
 wrangler secret put TARGET_AUTH_BEARER
 # then paste secret value when prompted
+```
+
+Generate and set `MASTER_ENCRYPTION_KEY`:
+
+```bash
+openssl rand -base64 32 | wrangler secret put MASTER_ENCRYPTION_KEY
+```
+
+Or use the helper script:
+
+```bash
+npm run bootstrap:master-key
 ```
 
 

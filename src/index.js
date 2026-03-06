@@ -10,6 +10,9 @@ import {
   renderSecretField,
   renderSecretFieldScript,
 } from "./ui.js";
+import { createCloudflareStorage } from "./internal/cloudflare/storage/index.js";
+import { StorageConnectorError } from "./common/storage/interface.js";
+import { createEnvelopeCrypto } from "./common/crypto/envelope.js";
 
 /**
  * API transform relay for Bubble-style clients.
@@ -224,6 +227,7 @@ const DEFAULT_CONFIG_V1 = {
 let jsonataFactory = null;
 let yamlApi = null;
 let lastDebugTrace = null;
+const masterKeyCache = new WeakMap();
 
 export default {
   async fetch(request, env, ctx) {
@@ -231,6 +235,9 @@ export default {
     const normalizedPath = normalizePathname(pathname);
 
     try {
+      if (normalizedPath === "/" || normalizedPath.startsWith(RESERVED_ROOT)) {
+        await ensureMasterEncryptionKeyInitialized(env);
+      }
       if (normalizedPath === "/" && request.method === "GET") {
         if (request.headers.get("X-Proxy-Key")) {
           return await handleRootProxyRequest(request, env, ctx);
@@ -415,7 +422,11 @@ function getEnvInt(env, key, fallback) {
 }
 
 function ensureKvBinding(env) {
-  if (!env || !env.CONFIG || typeof env.CONFIG.get !== "function" || typeof env.CONFIG.put !== "function") {
+  const kv = kvStore(env);
+  try {
+    kv.assertReady();
+  } catch (e) {
+    if (!(e instanceof StorageConnectorError) || e.code !== "MISSING_KV_BINDING") throw e;
     throw new HttpError(
       500,
       "MISSING_KV_BINDING",
@@ -424,6 +435,109 @@ function ensureKvBinding(env) {
         setup: "Add [[kv_namespaces]] binding = \"CONFIG\" in wrangler.toml and redeploy.",
       }
     );
+  }
+}
+
+function stateStore(env) {
+  return createCloudflareStorage(env);
+}
+
+function kvStore(env) {
+  return stateStore(env).keyValue;
+}
+
+function secretsStore(env) {
+  return stateStore(env).secrets;
+}
+
+function isEncryptedSecretKey(key) {
+  return key === KV_PROXY_KEY
+    || key === KV_ADMIN_KEY
+    || key === KV_ISSUER_KEY
+    || key === KV_PROXY_KEY_OLD
+    || key === KV_ADMIN_KEY_OLD
+    || key === KV_ISSUER_KEY_OLD
+    || key === KV_DEBUG_LOGGING_SECRET
+    || String(key || "").startsWith(KV_ENRICHED_HEADER_PREFIX);
+}
+
+function envelopeCrypto(env) {
+  return createEnvelopeCrypto({
+    env,
+    keyProvider: async () => {
+      return resolveMasterEncryptionKey(env);
+    },
+  });
+}
+
+async function ensureMasterEncryptionKeyInitialized(env) {
+  try {
+    await resolveMasterEncryptionKey(env);
+  } catch (e) {
+    throw mapCryptoError(e);
+  }
+}
+
+async function resolveMasterEncryptionKey(env) {
+  if (masterKeyCache.has(env)) return masterKeyCache.get(env);
+
+  const fromSecret = await secretsStore(env).get("MASTER_ENCRYPTION_KEY");
+  if (fromSecret) {
+    masterKeyCache.set(env, fromSecret);
+    return fromSecret;
+  }
+  const e = new Error("MASTER_ENCRYPTION_KEY is required for encrypted KV secrets.");
+  e.code = "MISSING_MASTER_ENCRYPTION_KEY";
+  throw e;
+}
+
+function mapCryptoError(error) {
+  if (error instanceof HttpError) return error;
+  const code = String(error?.code || "");
+  if (code === "MISSING_MASTER_ENCRYPTION_KEY") {
+    return new HttpError(
+      500,
+      "MISSING_MASTER_ENCRYPTION_KEY",
+      "MASTER_ENCRYPTION_KEY is not configured.",
+      {
+        setup: "Set MASTER_ENCRYPTION_KEY as a Cloudflare secret (32-byte base64 AES key).",
+      }
+    );
+  }
+  if (code === "INVALID_MASTER_ENCRYPTION_KEY") {
+    return new HttpError(
+      500,
+      "INVALID_MASTER_ENCRYPTION_KEY",
+      "MASTER_ENCRYPTION_KEY format is invalid.",
+      {
+        expected: "base64 for exactly 32 raw bytes (AES-256 key).",
+      }
+    );
+  }
+  if (code === "INVALID_ENCRYPTED_PAYLOAD") {
+    return new HttpError(500, "INVALID_ENCRYPTED_PAYLOAD", "Stored secret payload is corrupted.");
+  }
+  return error;
+}
+
+async function kvGetValue(env, key) {
+  const raw = await kvStore(env).get(key);
+  if (raw == null) return null;
+  if (!isEncryptedSecretKey(key)) return raw;
+  try {
+    return await envelopeCrypto(env).decryptMaybe(raw);
+  } catch (e) {
+    throw mapCryptoError(e);
+  }
+}
+
+async function kvPutValue(env, key, value) {
+  if (!isEncryptedSecretKey(key)) return kvStore(env).put(key, value);
+  try {
+    const encrypted = await envelopeCrypto(env).encrypt(value);
+    return kvStore(env).put(key, encrypted);
+  } catch (e) {
+    throw mapCryptoError(e);
   }
 }
 
@@ -902,14 +1016,14 @@ async function loadConfigV1(env) {
       }
       throw e;
     }
-    const [storedYaml, storedJson] = await Promise.all([env.CONFIG.get(KV_CONFIG_YAML), env.CONFIG.get(KV_CONFIG_JSON)]);
+    const [storedYaml, storedJson] = await Promise.all([kvStore(env).get(KV_CONFIG_YAML), kvStore(env).get(KV_CONFIG_JSON)]);
     const normalizedJson = JSON.stringify(normalized);
     if (storedYaml !== bootstrapYaml || storedJson !== normalizedJson) {
-      await Promise.all([env.CONFIG.put(KV_CONFIG_YAML, bootstrapYaml), env.CONFIG.put(KV_CONFIG_JSON, normalizedJson)]);
+      await Promise.all([kvStore(env).put(KV_CONFIG_YAML, bootstrapYaml), kvStore(env).put(KV_CONFIG_JSON, normalizedJson)]);
     }
     return normalized;
   }
-  const raw = await env.CONFIG.get(KV_CONFIG_JSON);
+  const raw = await kvStore(env).get(KV_CONFIG_JSON);
   if (!raw) return JSON.parse(JSON.stringify(DEFAULT_CONFIG_V1));
 
   try {
@@ -926,7 +1040,7 @@ async function loadConfigYamlV1(env) {
   if (bootstrapYaml) {
     return bootstrapYaml;
   }
-  const raw = await env.CONFIG.get(KV_CONFIG_YAML);
+  const raw = await kvStore(env).get(KV_CONFIG_YAML);
   if (raw) return raw;
   const config = await loadConfigV1(env);
   return stringifyYamlConfig(config);
@@ -936,8 +1050,8 @@ async function saveConfigFromYamlV1(yamlText, env) {
   ensureKvBinding(env);
   const normalized = await parseYamlConfigText(yamlText);
   await Promise.all([
-    env.CONFIG.put(KV_CONFIG_YAML, yamlText),
-    env.CONFIG.put(KV_CONFIG_JSON, JSON.stringify(normalized)),
+    kvStore(env).put(KV_CONFIG_YAML, yamlText),
+    kvStore(env).put(KV_CONFIG_JSON, JSON.stringify(normalized)),
   ]);
   return normalized;
 }
@@ -947,8 +1061,8 @@ async function saveConfigObjectV1(configObj, env) {
   const normalized = validateAndNormalizeConfigV1(configObj);
   const yamlText = await stringifyYamlConfig(normalized);
   await Promise.all([
-    env.CONFIG.put(KV_CONFIG_YAML, yamlText),
-    env.CONFIG.put(KV_CONFIG_JSON, JSON.stringify(normalized)),
+    kvStore(env).put(KV_CONFIG_YAML, yamlText),
+    kvStore(env).put(KV_CONFIG_JSON, JSON.stringify(normalized)),
   ]);
   return normalized;
 }
@@ -1017,7 +1131,7 @@ function getBootstrapEnrichedHeaders(env) {
 async function syncBootstrapEnrichedHeaders(env, managedHeaders) {
   ensureKvBinding(env);
   const names = Object.keys(managedHeaders || {});
-  const prevRaw = await env.CONFIG.get(KV_BOOTSTRAP_ENRICHED_HEADER_NAMES);
+  const prevRaw = await kvStore(env).get(KV_BOOTSTRAP_ENRICHED_HEADER_NAMES);
   let prev = [];
   try {
     const parsed = JSON.parse(prevRaw || "[]");
@@ -1030,16 +1144,16 @@ async function syncBootstrapEnrichedHeaders(env, managedHeaders) {
 
   const deletes = [];
   for (const name of prevSet) {
-    if (!nextSet.has(name)) deletes.push(env.CONFIG.delete(enrichedHeaderKvKey(name)));
+    if (!nextSet.has(name)) deletes.push(kvStore(env).delete(enrichedHeaderKvKey(name)));
   }
 
-  const gets = await Promise.all(names.map((name) => env.CONFIG.get(enrichedHeaderKvKey(name))));
+  const gets = await Promise.all(names.map((name) => kvGetValue(env, enrichedHeaderKvKey(name))));
   const puts = [];
   for (let i = 0; i < names.length; i += 1) {
     const name = names[i];
     const desired = managedHeaders[name];
     if (gets[i] !== desired) {
-      puts.push(env.CONFIG.put(enrichedHeaderKvKey(name), desired));
+      puts.push(kvPutValue(env, enrichedHeaderKvKey(name), desired));
     }
   }
 
@@ -1048,7 +1162,7 @@ async function syncBootstrapEnrichedHeaders(env, managedHeaders) {
   const namesChanged = prevSorted.length !== nextSorted.length || prevSorted.some((n, i) => n !== nextSorted[i]);
   const ops = [...deletes, ...puts];
   if (namesChanged) {
-    ops.push(env.CONFIG.put(KV_BOOTSTRAP_ENRICHED_HEADER_NAMES, JSON.stringify(nextSorted)));
+    ops.push(kvStore(env).put(KV_BOOTSTRAP_ENRICHED_HEADER_NAMES, JSON.stringify(nextSorted)));
   }
   if (ops.length > 0) {
     await Promise.all(ops);
@@ -1061,7 +1175,7 @@ async function listEnrichedHeaderNames(env, managedHeaders = null) {
   let cursor = undefined;
 
   while (true) {
-    const page = await env.CONFIG.list({
+    const page = await kvStore(env).list({
       prefix: KV_ENRICHED_HEADER_PREFIX,
       cursor,
       limit: 1000,
@@ -1091,7 +1205,7 @@ async function loadEnrichedHeadersMap(env) {
   const names = await listEnrichedHeaderNames(env, managedHeaders);
   if (names.length === 0) return {};
 
-  const values = await Promise.all(names.map((name) => env.CONFIG.get(enrichedHeaderKvKey(name))));
+  const values = await Promise.all(names.map((name) => kvGetValue(env, enrichedHeaderKvKey(name))));
   const out = {};
   for (let i = 0; i < names.length; i += 1) {
     const value = values[i];
@@ -1584,12 +1698,12 @@ function apiError(status, code, message, details = null, meta = null) {
 
 async function getProxyKey(env) {
   ensureKvBinding(env);
-  return env.CONFIG.get(KV_PROXY_KEY);
+  return kvGetValue(env, KV_PROXY_KEY);
 }
 
 async function getAdminKey(env) {
   ensureKvBinding(env);
-  return env.CONFIG.get(KV_ADMIN_KEY);
+  return kvGetValue(env, KV_ADMIN_KEY);
 }
 
 function keyKindConfig(kind) {
@@ -1651,11 +1765,11 @@ async function getKeyAuthState(kind, env) {
   const cfg = keyKindConfig(kind);
   ensureKvBinding(env);
   const [current, old, oldExpiresAtRaw, primaryCreatedAtRaw, secondaryCreatedAtRaw] = await Promise.all([
-    env.CONFIG.get(cfg.current),
-    env.CONFIG.get(cfg.old),
-    env.CONFIG.get(cfg.oldExpiresAt),
-    env.CONFIG.get(cfg.primaryCreatedAt),
-    env.CONFIG.get(cfg.secondaryCreatedAt),
+    kvGetValue(env, cfg.current),
+    kvGetValue(env, cfg.old),
+    kvStore(env).get(cfg.oldExpiresAt),
+    kvStore(env).get(cfg.primaryCreatedAt),
+    kvStore(env).get(cfg.secondaryCreatedAt),
   ]);
   const oldExpiresAt = Number(oldExpiresAtRaw || 0);
   const primaryCreatedAt = Number(primaryCreatedAtRaw || 0);
@@ -1706,7 +1820,7 @@ async function requireKeyKind(request, env, kind) {
   if (oldActive && !secondaryExpired && got === old) return;
 
   if (!!old && Number.isFinite(oldExpiresAt) && oldExpiresAt <= now) {
-    await Promise.all([env.CONFIG.delete(cfg.old), env.CONFIG.delete(cfg.oldExpiresAt), env.CONFIG.delete(cfg.secondaryCreatedAt)]);
+    await Promise.all([kvStore(env).delete(cfg.old), kvStore(env).delete(cfg.oldExpiresAt), kvStore(env).delete(cfg.secondaryCreatedAt)]);
   }
 
   if (old && Number.isFinite(oldExpiresAt) && oldExpiresAt > now) {
@@ -1957,7 +2071,7 @@ function resolveUpstreamUrl(rawUrl, proxyHostHeader) {
 
 async function handleStatusPage(env, request) {
   ensureKvBinding(env);
-  const [proxyKey, adminKey] = await Promise.all([env.CONFIG.get(KV_PROXY_KEY), env.CONFIG.get(KV_ADMIN_KEY)]);
+  const [proxyKey, adminKey] = await Promise.all([kvGetValue(env, KV_PROXY_KEY), kvGetValue(env, KV_ADMIN_KEY)]);
   const proxyInitialized = !!proxyKey;
   const adminInitialized = !!adminKey;
   if (!proxyInitialized || !adminInitialized) {
@@ -2008,16 +2122,16 @@ async function handleKeysStatusGet(env) {
     const secondaryActive = !!state.old && oldExpiresAt > now;
     if (state.current && !primaryCreatedAt) {
       primaryCreatedAt = now;
-      cleanup.push(env.CONFIG.put(state.cfg.primaryCreatedAt, String(primaryCreatedAt)));
+      cleanup.push(kvStore(env).put(state.cfg.primaryCreatedAt, String(primaryCreatedAt)));
     }
     if (!state.old) {
       secondaryCreatedAt = 0;
     } else if (!secondaryCreatedAt) {
       secondaryCreatedAt = now;
-      cleanup.push(env.CONFIG.put(state.cfg.secondaryCreatedAt, String(secondaryCreatedAt)));
+      cleanup.push(kvStore(env).put(state.cfg.secondaryCreatedAt, String(secondaryCreatedAt)));
     }
     if (state.old && oldExpiresAt <= now) {
-      cleanup.push(env.CONFIG.delete(state.cfg.old), env.CONFIG.delete(state.cfg.oldExpiresAt), env.CONFIG.delete(state.cfg.secondaryCreatedAt));
+      cleanup.push(kvStore(env).delete(state.cfg.old), kvStore(env).delete(state.cfg.oldExpiresAt), kvStore(env).delete(state.cfg.secondaryCreatedAt));
       secondaryCreatedAt = 0;
     }
     const expirySeconds = config?.apiKeyPolicy?.[keyKindConfig(kind).policyKey] ?? null;
@@ -2259,7 +2373,7 @@ async function handleKeyRotationConfigPut(request, env) {
 
 async function readDebugEnabledUntilMs(env) {
   ensureKvBinding(env);
-  const raw = await env.CONFIG.get(KV_DEBUG_ENABLED_UNTIL_MS);
+  const raw = await kvStore(env).get(KV_DEBUG_ENABLED_UNTIL_MS);
   const value = Number(raw);
   return Number.isFinite(value) ? value : 0;
 }
@@ -2438,7 +2552,7 @@ async function handleDebugLoggingSecretPut(request, env) {
       expected: { value: "secret-string" },
     });
   }
-  await env.CONFIG.put(KV_DEBUG_LOGGING_SECRET, value);
+  await kvPutValue(env, KV_DEBUG_LOGGING_SECRET, value);
   return jsonResponse(200, {
     ok: true,
     data: {
@@ -2449,7 +2563,7 @@ async function handleDebugLoggingSecretPut(request, env) {
 }
 
 async function handleDebugLoggingSecretGet(env) {
-  const secret = await env.CONFIG.get(KV_DEBUG_LOGGING_SECRET);
+  const secret = await kvGetValue(env, KV_DEBUG_LOGGING_SECRET);
   return jsonResponse(200, {
     ok: true,
     data: {
@@ -2460,7 +2574,7 @@ async function handleDebugLoggingSecretGet(env) {
 }
 
 async function handleDebugLoggingSecretDelete(env) {
-  await env.CONFIG.delete(KV_DEBUG_LOGGING_SECRET);
+  await kvStore(env).delete(KV_DEBUG_LOGGING_SECRET);
   return jsonResponse(200, {
     ok: true,
     data: {
@@ -2514,7 +2628,7 @@ async function handleDebugPut(request, env) {
   const maxTtlSeconds = Number(config?.debug?.max_debug_session_seconds || 3600);
 
   if (!enabled) {
-    await env.CONFIG.put(KV_DEBUG_ENABLED_UNTIL_MS, "0");
+    await kvStore(env).put(KV_DEBUG_ENABLED_UNTIL_MS, "0");
     return jsonResponse(200, {
       ok: true,
       data: {
@@ -2541,7 +2655,7 @@ async function handleDebugPut(request, env) {
   }
 
   const enabledUntilMs = Date.now() + ttlSecondsRaw * 1000;
-  await env.CONFIG.put(KV_DEBUG_ENABLED_UNTIL_MS, String(enabledUntilMs));
+  await kvStore(env).put(KV_DEBUG_ENABLED_UNTIL_MS, String(enabledUntilMs));
   return jsonResponse(200, {
     ok: true,
     data: {
@@ -2555,7 +2669,7 @@ async function handleDebugPut(request, env) {
 }
 
 async function handleDebugDelete(env) {
-  await env.CONFIG.put(KV_DEBUG_ENABLED_UNTIL_MS, "0");
+  await kvStore(env).put(KV_DEBUG_ENABLED_UNTIL_MS, "0");
   const config = await loadConfigV1(env);
   const maxTtlSeconds = Number(config?.debug?.max_debug_session_seconds || 3600);
   return jsonResponse(200, {
@@ -2595,7 +2709,7 @@ async function handleEnrichedHeaderPut(request, env, headerNameRaw) {
     });
   }
 
-  await env.CONFIG.put(enrichedHeaderKvKey(headerName), value);
+  await kvPutValue(env, enrichedHeaderKvKey(headerName), value);
   const names = await listEnrichedHeaderNames(env, managedHeaders);
   return jsonResponse(200, {
     enriched_headers: names,
@@ -2612,14 +2726,14 @@ async function handleEnrichedHeaderDelete(env, headerNameRaw) {
     });
   }
   const kvKey = enrichedHeaderKvKey(headerName);
-  const existing = await env.CONFIG.get(kvKey);
+  const existing = await kvGetValue(env, kvKey);
   if (!existing) {
     throw new HttpError(404, "HEADER_NOT_FOUND", "No enriched header exists for the provided name.", {
       name: headerName,
       hint: `List current enriched headers at ${ADMIN_ROOT}/headers.`,
     });
   }
-  await env.CONFIG.delete(kvKey);
+  await kvStore(env).delete(kvKey);
   const names = await listEnrichedHeaderNames(env, managedHeaders);
   return jsonResponse(200, {
     enriched_headers: names,
@@ -2675,18 +2789,18 @@ async function handleInitPage(env, request) {
 
 async function bootstrapMissingKeys(env) {
   ensureKvBinding(env);
-  const [existingProxy, existingAdmin] = await Promise.all([env.CONFIG.get(KV_PROXY_KEY), env.CONFIG.get(KV_ADMIN_KEY)]);
+  const [existingProxy, existingAdmin] = await Promise.all([kvGetValue(env, KV_PROXY_KEY), kvGetValue(env, KV_ADMIN_KEY)]);
   let createdProxy = null;
   let createdAdmin = null;
   const writes = [];
 
   if (!existingProxy) {
     createdProxy = generateSecret();
-    writes.push(env.CONFIG.put(KV_PROXY_KEY, createdProxy), env.CONFIG.put(KV_PROXY_PRIMARY_KEY_CREATED_AT, String(Date.now())));
+    writes.push(kvPutValue(env, KV_PROXY_KEY, createdProxy), kvStore(env).put(KV_PROXY_PRIMARY_KEY_CREATED_AT, String(Date.now())));
   }
   if (!existingAdmin) {
     createdAdmin = generateSecret();
-    writes.push(env.CONFIG.put(KV_ADMIN_KEY, createdAdmin), env.CONFIG.put(KV_ADMIN_PRIMARY_KEY_CREATED_AT, String(Date.now())));
+    writes.push(kvPutValue(env, KV_ADMIN_KEY, createdAdmin), kvStore(env).put(KV_ADMIN_PRIMARY_KEY_CREATED_AT, String(Date.now())));
   }
   if (writes.length > 0) await Promise.all(writes);
 
@@ -2735,15 +2849,15 @@ async function handleRotateByKind(kind, request, env) {
   const newKey = generateSecret();
   const expirySeconds = config?.apiKeyPolicy?.[cfg.policyKey] ?? null;
 
-  await Promise.all([env.CONFIG.put(cfg.current, newKey), env.CONFIG.put(cfg.primaryCreatedAt, String(now))]);
+  await Promise.all([kvPutValue(env, cfg.current, newKey), kvStore(env).put(cfg.primaryCreatedAt, String(now))]);
   if (current && overlapMs > 0) {
     await Promise.all([
-      env.CONFIG.put(cfg.old, current),
-      env.CONFIG.put(cfg.oldExpiresAt, String(oldExpiresAt)),
-      env.CONFIG.put(cfg.secondaryCreatedAt, String(currentPrimaryCreatedAt || now)),
+      kvPutValue(env, cfg.old, current),
+      kvStore(env).put(cfg.oldExpiresAt, String(oldExpiresAt)),
+      kvStore(env).put(cfg.secondaryCreatedAt, String(currentPrimaryCreatedAt || now)),
     ]);
   } else {
-    await Promise.all([env.CONFIG.delete(cfg.old), env.CONFIG.delete(cfg.oldExpiresAt), env.CONFIG.delete(cfg.secondaryCreatedAt)]);
+    await Promise.all([kvStore(env).delete(cfg.old), kvStore(env).delete(cfg.oldExpiresAt), kvStore(env).delete(cfg.secondaryCreatedAt)]);
   }
 
   const acceptsHtml = (request.headers.get("accept") || "").includes("text/html");

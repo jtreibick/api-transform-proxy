@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:templates": "node scripts/build-templates.mjs"
+    "build:templates": "node scripts/build-templates.mjs",
+    "bootstrap:master-key": "bash scripts/bootstrap-master-key.sh"
   },
   "dependencies": {
     "jsonata": "^2.0.6",
