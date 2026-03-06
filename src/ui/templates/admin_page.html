@@ -71,7 +71,6 @@
              </div>
            </div>
            <div style="margin-top:10px;"></div>
-          <pre id="logging-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;"></pre>
           <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
             <button type="button" id="footer-save-logging" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
           </div>
@@ -91,7 +90,6 @@
            <p style="margin:10px 0 6px;"><b>Test rule payload (JSON)</b></p>
            <textarea id="config-test-rule-input" rows="8"
              style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"></textarea>
-          <pre id="config-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Config output appears here.</pre>
           <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
             <button type="button" id="footer-save-config" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
           </div>
@@ -160,7 +158,6 @@
            </div>
            </div>
            <div style="margin-top:10px;"></div>
-          <pre id="kr-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;"></pre>
           <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
             <button type="button" id="footer-save-outbound-auth" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
           </div>
@@ -204,7 +201,6 @@
              </div>
            </div>
            <div id="headers-list" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;"></div>
-          <pre id="headers-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Outbound transformation output appears here.</pre>
           <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
             <button type="button" id="footer-save-outbound-transform" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
           </div>
@@ -244,7 +240,6 @@
              <div style="display:flex;gap:8px;flex-wrap:wrap;">
                <button type="button" id="rotate-issuer-btn">Rotate issuer key</button>
              </div>
-             <pre id="issuer-keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;"></pre>
            </div>
           <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
             <button type="button" id="footer-save-inbound-auth" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
@@ -264,7 +259,6 @@
            <div style="display:flex;gap:8px;flex-wrap:wrap;">
              <button type="button" id="rotate-admin-btn">Rotate admin key</button>
            </div>
-          <pre id="admin-keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;"></pre>
           <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
             <button type="button" id="footer-save-admin-auth" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
           </div>
@@ -297,9 +291,8 @@
            <label for="inbound-header-filtering-names" style="display:block;margin:8px 0 4px;">Header list (comma-separated)</label>
            <input id="inbound-header-filtering-names" type="text" placeholder="authorization, cookie"
              style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
-           <div style="font-size:12px;color:#64748b;margin-top:4px;">These headers will not be forwarded in the request.</div>
+           <div id="inbound-header-filtering-help" style="font-size:12px;color:#64748b;margin-top:4px;"></div>
            <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;"></div>
-          <pre id="inbound-transform-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Inbound transformation output appears here.</pre>
           <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
             <button type="button" id="footer-save-inbound-transform" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
           </div>
@@ -320,11 +313,12 @@
                <input id="sandbox-auth-value" type="password" placeholder="header value"
                  style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
              </div>
-             <label style="display:block;margin:4px 0 6px;">Endpoint</label>
-             <p id="sandbox-base-url" style="margin:0 0 8px 0;"></p>
-             <select id="sandbox-path" style="min-width:260px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;"></select>
-             <label for="sandbox-verb" style="display:block;margin:8px 0 4px;">Method</label>
-             <select id="sandbox-verb" style="min-width:120px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;"></select>
+             <label style="display:block;margin:4px 0 6px;">Method + endpoint</label>
+             <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+               <select id="sandbox-verb" style="min-width:120px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;"></select>
+               <select id="sandbox-path" style="min-width:260px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;"></select>
+             </div>
+             <p id="sandbox-base-url" style="margin:6px 0 8px 0;font-size:12px;color:#64748b;"></p>
              <label for="sandbox-url" style="display:block;margin:8px 0 4px;">Full Request URL (editable)</label>
              <a href="#" id="sandbox-url-toggle" style="font-size:12px;text-decoration:underline;">hide</a>
              <div id="sandbox-url-wrap">

@@ -213,6 +213,57 @@
           const prefix = text.trim().length ? 'jwt:\n  enabled: ' + value + '\n' : 'jwt:\n  enabled: ' + value + '\n';
           return prefix + text;
         }
+        function parseInboundHeaderFilteringFromYaml(yamlText) {
+          const text = String(yamlText || '');
+          const lines = text.split('\n');
+          let inTransform = false;
+          let inInbound = false;
+          let inHeader = false;
+          let inNames = false;
+          let mode = '';
+          const names = [];
+          for (const line of lines) {
+            if (/^\S/.test(line)) {
+              inTransform = line.startsWith('transform:');
+              inInbound = false;
+              inHeader = false;
+              inNames = false;
+              continue;
+            }
+            if (inTransform && /^\s{2}\S/.test(line)) {
+              inInbound = /^\s{2}inbound:\s*$/.test(line);
+              inHeader = false;
+              inNames = false;
+              continue;
+            }
+            if (inInbound && /^\s{4}\S/.test(line)) {
+              inHeader = /^\s{4}header_filtering:\s*$/.test(line);
+              inNames = false;
+              continue;
+            }
+            if (inHeader && /^\s{6}\S/.test(line)) {
+              const modeMatch = line.match(/^\s{6}mode:\s*(\w+)\s*$/);
+              if (modeMatch) {
+                mode = modeMatch[1].toLowerCase();
+                inNames = false;
+                continue;
+              }
+              if (/^\s{6}names:\s*$/.test(line)) {
+                inNames = true;
+                continue;
+              }
+              inNames = false;
+            }
+            if (inHeader && inNames) {
+              const itemMatch = line.match(/^\s{8}-\s*(.+)\s*$/);
+              if (itemMatch) {
+                names.push(itemMatch[1].trim());
+              }
+            }
+          }
+          if (!mode && names.length === 0) return null;
+          return { mode, names };
+        }
         function updateProxyHeader(proxyName) {
           const host = window.location.host || '';
           const name = String(proxyName || '').trim();
@@ -434,17 +485,17 @@
              if (!Number.isInteger(ttl) || ttl < 1) {
                throw new Error('Logging TTL must be a positive integer.');
              }
-             setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug', 'PUT', { enabled: true, ttl_seconds: ttl }));
+             await apiCall(ADMIN_ROOT + '/debug', 'PUT', { enabled: true, ttl_seconds: ttl });
              await loadLoggingStatus();
            }
-           catch (e) { setOutput('logging-output', String(e.message || e)); }
+           catch (e) { showWarning(String(e.message || e)); }
          }
          async function debugDisable() {
            try {
-             setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug', 'DELETE'));
+             await apiCall(ADMIN_ROOT + '/debug', 'DELETE');
              await loadLoggingStatus();
            }
-           catch (e) { setOutput('logging-output', String(e.message || e)); }
+           catch (e) { showWarning(String(e.message || e)); }
          }
          async function debugLoadTrace() {
            try { setOutput('debug-output', await apiCall(ADMIN_ROOT + '/debug/last', 'GET', undefined, true)); }
@@ -453,19 +504,19 @@
         async function loggingSecretSave() {
           try {
             const payload = { value: el('logging-secret')?.value || '' };
-            setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug/loggingSecret', 'PUT', payload));
+            await apiCall(ADMIN_ROOT + '/debug/loggingSecret', 'PUT', payload);
             await loadLoggingStatus();
             clearDirty('debug');
           } catch (e) {
-            setOutput('logging-output', String(e.message || e));
+            showWarning(String(e.message || e));
           }
         }
          async function loggingSecretDelete() {
            try {
-             setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug/loggingSecret', 'DELETE'));
+             await apiCall(ADMIN_ROOT + '/debug/loggingSecret', 'DELETE');
              await loadLoggingStatus();
            }
-           catch (e) { setOutput('logging-output', String(e.message || e)); }
+           catch (e) { showWarning(String(e.message || e)); }
          }
          async function loadLoggingStatus() {
            try {
@@ -498,8 +549,8 @@
             if (el('logging-status')) {
               const html = d.enabled
                 ? '<div style="background:#fef9c3;border:1px solid #fde68a;color:#92400e;padding:8px 10px;border-radius:8px;margin-bottom:6px;">Logging is enabled.</div>'
-                  + '<a href="#" id="logging-disable-link">disable</a> | ' + enabledText
-                : enabledText + ' | <a href="#" id="logging-enable-link">enable</a>';
+                  + '<b>Logging:</b> <b>enabled</b> | <a href="#" id="logging-disable-link">disable</a>'
+                : '<b>Logging:</b> <a href="#" id="logging-enable-link">enable</a> | <b>disabled</b>';
               setHtml('logging-status', html);
             }
             const ttlRemaining = Number.isFinite(Number(d.ttl_remaining_seconds)) ? Number(d.ttl_remaining_seconds) : null;
@@ -513,9 +564,8 @@
             if (el('logging-config-enabled')) el('logging-config-enabled').checked = configEnabled;
             if (el('logging-config-fields')) el('logging-config-fields').style.display = configEnabled ? 'block' : 'none';
             if (el('logging-secret-wrap')) el('logging-secret-wrap').style.display = configEnabled ? 'block' : 'none';
-            if (el('logging-output')) el('logging-output').textContent = '';
           } catch (e) {
-            setOutput('logging-output', String(e.message || e));
+            showWarning(String(e.message || e));
           }
         }
         async function configLoad() {
@@ -793,11 +843,19 @@
             setOutput('admin-keys-output', String(e.message || e));
           }
         }
-         function setOutboundAuthEnabled(enabled) {
-           const on = !!enabled;
-           if (el('outbound-auth-enabled')) el('outbound-auth-enabled').checked = on;
-           if (el('outbound-auth-fields')) el('outbound-auth-fields').style.display = on ? 'block' : 'none';
-         }
+        function setOutboundAuthEnabled(enabled) {
+          const on = !!enabled;
+          if (el('outbound-auth-enabled')) el('outbound-auth-enabled').checked = on;
+          if (el('outbound-auth-fields')) el('outbound-auth-fields').style.display = on ? 'block' : 'none';
+        }
+        function updateInboundHeaderFilteringHelp(modeValue) {
+          const mode = String(modeValue || 'blacklist');
+          const node = el('inbound-header-filtering-help');
+          if (!node) return;
+          node.textContent = mode === 'whitelist'
+            ? 'Headers not included in this list will be ignored.'
+            : 'These headers will not be forwarded in the request.';
+        }
         function emptyOutboundRule() {
           return { name: '', method: [], headers: [], expr: '' };
         }
@@ -1006,11 +1064,26 @@
             if (el('transform-global-enabled-inbound')) el('transform-global-enabled-inbound').checked = enabled;
             const outbound = d.outbound || {};
             const inbound = d.inbound || {};
-            if (el('inbound-header-filtering-mode')) el('inbound-header-filtering-mode').value = String(inbound?.header_filtering?.mode || 'blacklist');
+            let headerMode = inbound?.header_filtering?.mode;
+            let headerNames = Array.isArray(inbound?.header_filtering?.names) ? inbound.header_filtering.names : [];
+            if (!headerMode && !headerNames.length) {
+              try {
+                const yamlText = await apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true);
+                const parsed = parseInboundHeaderFilteringFromYaml(yamlText);
+                if (parsed) {
+                  headerMode = parsed.mode || headerMode;
+                  headerNames = parsed.names || headerNames;
+                }
+              } catch {
+                // ignore config fallback errors
+              }
+            }
+            if (el('inbound-header-filtering-mode')) el('inbound-header-filtering-mode').value = String(headerMode || 'blacklist');
             if (el('inbound-header-filtering-names')) {
-              const names = Array.isArray(inbound?.header_filtering?.names) ? inbound.header_filtering.names.join(', ') : '';
+              const names = Array.isArray(headerNames) ? headerNames.join(', ') : '';
               el('inbound-header-filtering-names').value = names;
             }
+            updateInboundHeaderFilteringHelp(el('inbound-header-filtering-mode')?.value || 'blacklist');
             if (el('outbound-default-expr')) el('outbound-default-expr').value = String(outbound.defaultExpr || '');
             if (el('outbound-fallback')) el('outbound-fallback').value = String(outbound.fallback || 'passthrough');
             if (el('inbound-default-expr')) el('inbound-default-expr').value = String(inbound.defaultExpr || '');
@@ -1019,13 +1092,10 @@
             inboundRuleDrafts = Array.isArray(inbound.rules) ? inbound.rules.map(normalizeRuleForUi) : [];
             renderTransformRules('outbound');
             renderTransformRules('inbound');
-            if (el('headers-output')) el('headers-output').textContent = '';
-            if (el('inbound-transform-output')) el('inbound-transform-output').textContent = '';
             clearDirty('outbound-transform');
             clearDirty('inbound-transform');
           } catch (e) {
-            setOutput('headers-output', String(e.message || e));
-            setOutput('inbound-transform-output', String(e.message || e));
+            // no-op: keep UI clean
           }
         }
         async function saveTransformConfig(kind) {
@@ -1602,9 +1672,12 @@
            el('outbound-auth-enabled')?.addEventListener('change', () => {
              setOutboundAuthEnabled(!!el('outbound-auth-enabled')?.checked);
            });
-           el('outbound-mode')?.addEventListener('change', () => {
-             setOutboundMode(el('outbound-mode')?.value || 'autorotation');
-           });
+          el('outbound-mode')?.addEventListener('change', () => {
+            setOutboundMode(el('outbound-mode')?.value || 'autorotation');
+          });
+          el('inbound-header-filtering-mode')?.addEventListener('change', () => {
+            updateInboundHeaderFilteringHelp(el('inbound-header-filtering-mode')?.value || 'blacklist');
+          });
           el('config-yaml')?.addEventListener('input', () => {
             setConfigSaveEnabled(false);
             if (configValidateTimer) clearTimeout(configValidateTimer);
