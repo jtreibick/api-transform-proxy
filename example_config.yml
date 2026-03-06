@@ -1,0 +1,51 @@
+targetHost: null
+apiKeyPolicy:
+  proxyExpirySeconds: null
+  issuerExpirySeconds: null
+  adminExpirySeconds: null
+targetCredentialRotation:
+  enabled: false
+  strategy: json_ttl
+  request:
+    method: POST
+    url: ""
+    headers: {}
+    body:
+      type: json
+      value: {}
+  response:
+    key_path: data.apiKey
+    ttl_path: data.ttl
+    ttl_unit: seconds
+    expires_at_path: null
+  trigger:
+    refresh_skew_seconds: 300
+    retry_once_on_401: true
+debug:
+  max_debug_session_seconds: 3600
+  loggingEndpoint:
+    url: null
+    auth_header: null
+    auth_value: null
+transform:
+  enabled: true
+  defaultExpr: ""
+  fallback: passthrough
+  rules: []
+header_forwarding:
+  mode: blacklist
+  names:
+    - connection
+    - keep-alive
+    - proxy-authenticate
+    - proxy-authorization
+    - te
+    - trailer
+    - transfer-encoding
+    - upgrade
+    - host
+    - content-length
+    - x-proxy-key
+    - x-admin-key
+    - x-issuer-key
+    - x-proxy-host

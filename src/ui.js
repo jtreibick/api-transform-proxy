@@ -31,11 +31,11 @@ function renderTemplate(name, vars = {}) {
 
 export function htmlPage(title, bodyHtml) {
   const safeTitle = escapeHtml(title || "");
-  const headingHtml = safeTitle ? `<h2>${safeTitle}</h2>` : "";
   return renderTemplate("page", {
     title: safeTitle,
     favicon_data_url: FAVICON_DATA_URL,
-    heading_html: headingHtml,
+    heading_text: safeTitle,
+    heading_style: safeTitle ? "" : "display:none;",
     body_html: bodyHtml || "",
   });
 }
@@ -78,4 +78,18 @@ export function renderSecretField(label, value, id, note = "", actionsEnabled = 
 export function renderSecretFieldScript() {
   const js = templates.secret_field_js || "";
   return `<script>\n${js}\n</script>`;
+}
+
+export function renderAdminPage() {
+  const bodyHtml = renderTemplate("admin_page", {
+    favicon_data_url: FAVICON_DATA_URL,
+  });
+  return new Response(
+    htmlPage("", bodyHtml),
+    { headers: { "content-type": "text/html; charset=utf-8" } }
+  );
+}
+
+export function renderAdminPageScript() {
+  return templates.admin_page_js || "";
 }

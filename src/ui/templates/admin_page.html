@@ -1,0 +1,172 @@
+<div style="margin-bottom:10px;">
+         <img src="{{favicon_data_url}}" width="48" height="48" alt="API Transform Proxy icon" />
+       </div>
+       <h1 style="margin:0 0 10px 0;font-size:30px;">Admin Console</h1>
+       <div id="admin-warning" style="display:none;padding:10px 12px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:8px;margin:10px 0;"></div>
+       <div id="admin-auth" style="margin:12px 0;">
+         <label for="admin-key" style="display:block;font-weight:700;margin-bottom:6px;">Admin API Key</label>
+         <input id="admin-key" type="password" placeholder="paste X-Admin-Key"
+           style="width:100%;max-width:560px;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;" />
+         <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+           <button type="button" id="login-btn"
+             style="padding:8px 12px;border:1px solid #0f172a;border-radius:8px;background:#111827;color:#fff;cursor:pointer;">Login</button>
+         </div>
+       </div>
+       <div id="admin-shell" style="display:none;">
+         <div style="display:flex;gap:14px;align-items:flex-start;margin:14px 0;">
+         <div id="admin-nav" style="display:flex;flex-direction:column;gap:8px;min-width:220px;">
+           <button type="button" class="tab-btn" data-tab="overview">Status</button>
+           <button type="button" class="tab-btn" data-tab="config">Config</button>
+           <button type="button" class="tab-btn" data-tab="key-rotation">Key Rotation</button>
+           <button type="button" class="tab-btn" data-tab="debug">Logging</button>
+           <button type="button" class="tab-btn" data-tab="headers">Enrichments</button>
+           <button type="button" class="tab-btn" data-tab="keys">API Access Keys</button>
+         </div>
+         <div style="flex:1;min-width:0;">
+         <div id="tab-overview" class="tab-panel">
+           <p><b>Status</b></p>
+           <div id="overview-output" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;">Click "Refresh status".</div>
+           <button type="button" id="overview-refresh-btn">Refresh status</button>
+         </div>
+         <div id="tab-debug" class="tab-panel" style="display:none;">
+           <p><b>Logging controls</b></p>
+           <p style="margin-top:16px;"><b>Logging configuration (read-only)</b></p>
+           <label for="logging-config-url" style="display:block;margin:8px 0 4px;">Logging Endpoint URL (from YAML config)</label>
+           <input id="logging-config-url" type="text" readonly
+             style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;margin-bottom:8px;" />
+           <label for="logging-config-auth-header" style="display:block;margin:2px 0 4px;">Logging Auth Header (from YAML config)</label>
+           <input id="logging-config-auth-header" type="text" readonly
+             style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;margin-bottom:8px;" />
+           <p style="font-size:13px;color:#475569;margin:6px 0 0 0;">To modify logging URL/header, update YAML config under <code>debug.loggingEndpoint</code>. <a href="#" id="logging-open-config-link">Open Config</a></p>
+           <p style="font-size:13px;color:#475569;margin:4px 0 0 0;">Logging secrets are managed via this API only and are not stored in YAML.</p>
+           <div id="logging-status" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin:10px 0;">Loading logging status...</div>
+           <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+             <button type="button" id="debug-enable-btn">Enable debug</button>
+             <button type="button" id="debug-disable-btn">Disable debug</button>
+           </div>
+           <pre id="logging-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Logging output appears here.</pre>
+           <p style="margin-top:10px;"><a href="#" id="debug-refresh-trace-link">Refresh last trace</a></p>
+           <pre id="debug-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;">Debug output appears here.</pre>
+           <p style="margin-top:16px;"><b>Logging auth secret</b></p>
+           <label for="logging-secret" style="display:block;margin:8px 0 4px;">Secret value</label>
+           <input id="logging-secret" type="password" placeholder="set logging auth secret"
+             style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
+           <div style="display:flex;gap:8px;flex-wrap:wrap;">
+             <button type="button" id="logging-secret-save-btn">Save/Update secret</button>
+             <button type="button" id="logging-secret-delete-btn">Delete secret</button>
+           </div>
+         </div>
+         <div id="tab-config" class="tab-panel" style="display:none;">
+           <p><b>YAML config</b></p>
+           <textarea id="config-yaml" rows="14"
+             style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"></textarea>
+           <p id="config-validation-error" style="display:none;margin:6px 0 0;color:#b91c1c;font-size:14px;"></p>
+           <div style="margin-top:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+             <button type="button" id="config-save-btn">Save</button>
+             <a href="#" id="config-reload-link">Reload config</a>
+             <a href="#" id="config-test-rule-link">Test rule</a>
+           </div>
+           <p style="margin:10px 0 6px;"><b>Test rule payload (JSON)</b></p>
+           <textarea id="config-test-rule-input" rows="8"
+             style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">{"sample":{"status":500,"headers":{"content-type":"application/json"},"type":"json","body":{"error":"bad"}}}</textarea>
+           <pre id="config-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Config output appears here.</pre>
+         </div>
+         <div id="tab-key-rotation" class="tab-panel" style="display:none;">
+           <p><b>Key rotation configuration</b></p>
+           <label for="kr-enabled" style="display:block;margin:8px 0 4px;">Enabled</label>
+           <input id="kr-enabled" type="checkbox" />
+
+           <label for="kr-strategy" style="display:block;margin:10px 0 4px;">Strategy</label>
+           <select id="kr-strategy" style="width:100%;max-width:420px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;">
+             <option value="json_ttl">json_ttl</option>
+             <option value="oauth_client_credentials">oauth_client_credentials</option>
+           </select>
+
+           <label for="kr-request-yaml" style="display:block;margin:10px 0 4px;">Request (YAML object)</label>
+           <textarea id="kr-request-yaml" rows="12"
+             style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"></textarea>
+
+           <label for="kr-key-path" style="display:block;margin:10px 0 4px;">Response Key Path</label>
+           <input id="kr-key-path" type="text" placeholder="data.apiKey"
+             style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+
+           <label for="kr-ttl-path" style="display:block;margin:10px 0 4px;">Response TTL Path</label>
+           <input id="kr-ttl-path" type="text" placeholder="data.ttl"
+             style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+
+           <label for="kr-ttl-unit" style="display:block;margin:10px 0 4px;">TTL Unit</label>
+           <select id="kr-ttl-unit" style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;">
+             <option value="seconds">seconds</option>
+             <option value="minutes">minutes</option>
+             <option value="hours">hours</option>
+           </select>
+
+           <label for="kr-expires-at-path" style="display:block;margin:10px 0 4px;">Response Expires-At Path</label>
+           <input id="kr-expires-at-path" type="text" placeholder="data.expiresAt (optional)"
+             style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+
+           <label for="kr-refresh-skew" style="display:block;margin:10px 0 4px;">Refresh Skew Seconds</label>
+           <input id="kr-refresh-skew" type="number" min="0" step="1"
+             style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+
+           <label for="kr-retry-on-401" style="display:block;margin:10px 0 4px;">Retry Once On 401</label>
+           <input id="kr-retry-on-401" type="checkbox" />
+
+           <label for="kr-proxy-expiry" style="display:block;margin:10px 0 4px;">Proxy Key Expiry Seconds</label>
+           <input id="kr-proxy-expiry" type="text" placeholder="null or integer"
+             style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+
+           <label for="kr-issuer-expiry" style="display:block;margin:10px 0 4px;">Target Auth Key Expiry Seconds</label>
+           <input id="kr-issuer-expiry" type="text" placeholder="null or integer"
+             style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+
+           <label for="kr-admin-expiry" style="display:block;margin:10px 0 4px;">Admin Key Expiry Seconds</label>
+           <input id="kr-admin-expiry" type="text" placeholder="null or integer"
+             style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+
+           <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap;">
+             <button type="button" id="kr-save-btn">Save key rotation config</button>
+             <button type="button" id="kr-reload-btn">Reload key rotation config</button>
+           </div>
+           <pre id="kr-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Key rotation output appears here.</pre>
+         </div>
+         <div id="tab-headers" class="tab-panel" style="display:none;">
+           <p><b>Enrichments</b></p>
+           <label for="header-name" style="display:block;margin:8px 0 4px;">Header Key</label>
+           <input id="header-name" type="text" placeholder="authorization"
+             style="width:100%;max-width:460px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
+           <label for="header-value" style="display:block;margin:2px 0 4px;">Header Value/Secret</label>
+           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+             <input id="header-value" type="password" placeholder="header value/secret"
+               style="width:100%;max-width:360px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
+             <a href="#" id="header-value-toggle-btn" style="margin-bottom:8px;font-size:12px;text-decoration:underline;">show</a>
+           </div>
+           <div style="display:flex;gap:8px;flex-wrap:wrap;">
+             <button type="button" id="headers-save-btn">Add header</button>
+           </div>
+           <div id="headers-list" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;"></div>
+           <pre id="headers-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Header output appears here.</pre>
+         </div>
+         <div id="tab-keys" class="tab-panel" style="display:none;">
+           <p><b>Key rotation</b></p>
+           <div id="keys-status" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin-bottom:10px;">Key status will appear here.</div>
+           <div style="display:flex;gap:8px;flex-wrap:wrap;">
+             <button type="button" id="keys-refresh-btn">Refresh key status</button>
+             <button type="button" id="rotate-proxy-btn">Rotate proxy key</button>
+             <button type="button" id="rotate-issuer-btn">Rotate target auth key</button>
+             <button type="button" id="rotate-admin-btn">Rotate admin key</button>
+           </div>
+           <pre id="keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Rotation output appears here.</pre>
+         </div>
+         </div>
+         </div>
+       </div>
+       <dialog id="delete-header-modal" style="max-width:420px;border:1px solid #e2e8f0;border-radius:10px;padding:16px;">
+         <p style="margin-top:0;"><b>Delete enrichment?</b></p>
+         <p id="delete-header-modal-text" style="margin:8px 0 12px 0;"></p>
+         <div style="display:flex;gap:8px;justify-content:flex-end;">
+           <button type="button" id="delete-header-cancel-btn">Cancel</button>
+           <button type="button" id="delete-header-confirm-btn">Delete</button>
+         </div>
+       </dialog>
+<script src="/_apiproxy/admin/assets/admin-page.js"></script>
