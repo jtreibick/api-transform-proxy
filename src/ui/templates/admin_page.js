@@ -4,7 +4,6 @@
         let pendingDeleteHeaderName = '';
         let configValidateTimer = null;
         let sandboxTemplateKey = '';
-        let sandboxSyncingControls = false;
         let outboundRuleDrafts = [];
         let inboundRuleDrafts = [];
         let currentTabName = 'overview';
@@ -89,13 +88,105 @@
            if (!node) return;
            node.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
          }
-         function htmlEscape(value) {
-           return String(value ?? '')
-             .replace(/&/g, '&amp;')
-             .replace(/</g, '&lt;')
-             .replace(/>/g, '&gt;')
-             .replace(/"/g, '&quot;');
-         }
+        function htmlEscape(value) {
+          return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+        }
+        function renderRequestForm(prefix, options) {
+          const verbs = Array.isArray(options?.verbs) && options.verbs.length
+            ? options.verbs
+            : ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
+          const disableVerb = !!options?.disableVerb;
+          const disableUrl = !!options?.disableUrl;
+          const disableHeaders = !!options?.disableHeaders;
+          const disableBody = !!options?.disableBody;
+          const verbOptions = verbs
+            .map((verb) => '<option value="' + htmlEscape(String(verb).toUpperCase()) + '">' + htmlEscape(String(verb).toUpperCase()) + '</option>')
+            .join('');
+          return ''
+            + '<label for="' + prefix + '-verb" style="display:block;margin:8px 0 4px;">Verb</label>'
+            + '<select id="' + prefix + '-verb" ' + (disableVerb ? 'disabled ' : '')
+            + 'style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;' + (disableVerb ? 'background:#f8fafc;' : '') + '">'
+            + verbOptions
+            + '</select>'
+            + '<label for="' + prefix + '-url" style="display:block;margin:10px 0 4px;">Url</label>'
+            + '<input id="' + prefix + '-url" type="text" placeholder="https://... or /_apiproxy/..." ' + (disableUrl ? 'disabled ' : '')
+            + 'style="width:100%;max-width:760px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;' + (disableUrl ? 'background:#f8fafc;' : '') + '" />'
+            + '<label for="' + prefix + '-headers" style="display:block;margin:10px 0 4px;">Headers</label>'
+            + '<textarea id="' + prefix + '-headers" rows="4" placeholder="Header-Name: value" ' + (disableHeaders ? 'disabled ' : '')
+            + 'style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;' + (disableHeaders ? 'background:#f8fafc;' : '') + '"></textarea>'
+            + '<label for="' + prefix + '-body" style="display:block;margin:10px 0 4px;">Request Body</label>'
+            + '<textarea id="' + prefix + '-body" rows="8" placeholder="JSON or raw text" ' + (disableBody ? 'disabled ' : '')
+            + 'style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;' + (disableBody ? 'background:#f8fafc;' : '') + '"></textarea>';
+        }
+        function headersObjectToMultiline(obj) {
+          if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return '';
+          return Object.entries(obj)
+            .map(([name, value]) => String(name) + ': ' + String(value ?? ''))
+            .join('\n');
+        }
+        function headersMultilineToObject(text) {
+          const out = {};
+          const lines = String(text || '').split('\n');
+          for (const lineRaw of lines) {
+            const line = lineRaw.trim();
+            if (!line) continue;
+            const idx = line.indexOf(':');
+            if (idx === -1) {
+              throw new Error('Headers must be in "Name: value" format.');
+            }
+            const name = line.slice(0, idx).trim();
+            const value = line.slice(idx + 1).trim();
+            if (!name) throw new Error('Header name is required.');
+            out[name] = value;
+          }
+          return out;
+        }
+        function requestBodyFromText(text) {
+          const raw = String(text ?? '').trim();
+          if (!raw) return { type: 'none' };
+          try {
+            return { type: 'json', value: JSON.parse(raw) };
+          } catch {
+            return { type: 'raw', raw };
+          }
+        }
+        function requestBodyToText(body) {
+          if (!body || typeof body !== 'object') return '';
+          if (body.type === 'none') return '';
+          if (body.type === 'json') {
+            try { return JSON.stringify(body.value ?? null, null, 2); } catch { return String(body.value ?? ''); }
+          }
+          if (body.type === 'urlencoded' && body.value && typeof body.value === 'object') {
+            try { return new URLSearchParams(body.value).toString(); } catch { return String(body.value ?? ''); }
+          }
+          if (body.type === 'raw') return String(body.raw ?? '');
+          if (body.raw != null) return String(body.raw);
+          if (body.value != null) return typeof body.value === 'string' ? body.value : JSON.stringify(body.value, null, 2);
+          return '';
+        }
+        function readRequestForm(prefix) {
+          const headers = headersMultilineToObject(el(prefix + '-headers')?.value || '');
+          const body = requestBodyFromText(el(prefix + '-body')?.value || '');
+          const req = {
+            method: String(el(prefix + '-verb')?.value || 'POST').toUpperCase(),
+            url: String(el(prefix + '-url')?.value || '').trim(),
+            headers,
+          };
+          if (body.type && body.type !== 'none') req.body = body;
+          return req;
+        }
+        function setRequestForm(prefix, request) {
+          const req = request && typeof request === 'object' ? request : {};
+          const method = String(req.method || 'GET').toUpperCase();
+          if (el(prefix + '-verb')) el(prefix + '-verb').value = method;
+          if (el(prefix + '-url')) el(prefix + '-url').value = String(req.url || '');
+          if (el(prefix + '-headers')) el(prefix + '-headers').value = headersObjectToMultiline(req.headers || {});
+          if (el(prefix + '-body')) el(prefix + '-body').value = requestBodyToText(req.body);
+        }
          function setHtml(id, html) {
            const node = el(id);
            if (!node) return;
@@ -286,7 +377,7 @@
             if (el('jwt-inbound-scheme')) el('jwt-inbound-scheme').value = String(inbound.scheme || 'Bearer');
             if (el('jwt-inbound-issuer')) el('jwt-inbound-issuer').value = inbound.issuer || '';
             if (el('jwt-inbound-audience')) el('jwt-inbound-audience').value = inbound.audience || '';
-            if (el('jwt-inbound-jwks-url')) el('jwt-inbound-jwks-url').value = inbound.jwks_url || '';
+            setRequestForm('jwt-jwks', inbound.http_request || {});
             if (el('jwt-inbound-skew')) el('jwt-inbound-skew').value = inbound.clock_skew_seconds == null ? '' : String(inbound.clock_skew_seconds);
             if (el('jwt-outbound-header')) el('jwt-outbound-header').value = String(outbound.header || 'Authorization');
             if (el('jwt-outbound-scheme')) el('jwt-outbound-scheme').value = String(outbound.scheme || 'Bearer');
@@ -523,10 +614,34 @@
            try { setOutput('debug-output', await apiCall(ADMIN_ROOT + '/debug/last', 'GET', undefined, true)); }
            catch (e) { setOutput('debug-output', String(e.message || e)); }
          }
-        async function loggingSecretSave() {
+        async function loggingSave() {
           try {
-            const payload = { value: el('logging-secret')?.value || '' };
-            await apiCall(ADMIN_ROOT + '/debug/loggingSecret', 'PUT', payload);
+            const enabled = !!el('logging-config-enabled')?.checked;
+            const config = await fetchConfigJsonFromYaml();
+            if (!config.debug) config.debug = {};
+            if (enabled) {
+              const req = readRequestForm('logging-req');
+              config.debug.loggingEndpoint = { http_request: req };
+            } else {
+              config.debug.loggingEndpoint = { http_request: null };
+            }
+            const cfgRes = await fetch(ADMIN_ROOT + '/config', {
+              method: 'PUT',
+              headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'application/json' },
+              body: JSON.stringify(config),
+            });
+            if (cfgRes.status === 401) {
+              handleUnauthorized();
+              throw new Error('Unauthorized (401)');
+            }
+            if (!cfgRes.ok) {
+              const text = await cfgRes.text();
+              throw new Error(text || 'Failed to save logging config');
+            }
+            const secretValue = el('logging-secret')?.value || '';
+            if (secretValue.trim()) {
+              await apiCall(ADMIN_ROOT + '/debug/loggingSecret', 'PUT', { value: secretValue });
+            }
             await loadLoggingStatus();
             clearDirty('debug');
           } catch (e) {
@@ -547,25 +662,22 @@
                apiCall(ADMIN_ROOT + '/debug/loggingSecret', 'GET'),
                apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true),
              ]);
-            let endpointUrl = '';
-            let endpointAuthHeader = '';
-             try {
-               const res = await fetch(ADMIN_ROOT + '/config/validate', {
-                 method: 'POST',
-                 headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'text/yaml' },
-                 body: yamlText,
-               });
+            let endpointRequest = null;
+            try {
+              const res = await fetch(ADMIN_ROOT + '/config/validate', {
+                method: 'POST',
+                headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'text/yaml' },
+                body: yamlText,
+              });
                const txt = await res.text();
                let parsed = null;
                try { parsed = JSON.parse(txt); } catch {}
-               if (res.ok && parsed?.data?.config?.debug?.loggingEndpoint) {
-                 const cfg = parsed.data.config.debug.loggingEndpoint;
-                endpointUrl = cfg.url || '';
-                endpointAuthHeader = cfg.auth_header || '';
-               }
-             } catch {}
-            if (el('logging-config-url')) el('logging-config-url').value = endpointUrl;
-            if (el('logging-config-auth-header')) el('logging-config-auth-header').value = endpointAuthHeader;
+              if (res.ok && parsed?.data?.config?.debug?.loggingEndpoint) {
+                const cfg = parsed.data.config.debug.loggingEndpoint;
+                endpointRequest = cfg.http_request || null;
+              }
+            } catch {}
+            setRequestForm('logging-req', endpointRequest || {});
             const d = debugStatus?.data || {};
             const enabledText = d.enabled ? 'enabled' : 'disabled';
             if (el('logging-status')) {
@@ -582,7 +694,7 @@
             if (el('logging-ttl-seconds') && Number(d.max_ttl_seconds || 0) > 0 && !el('logging-ttl-seconds').value) {
               el('logging-ttl-seconds').value = String(Number(d.max_ttl_seconds));
             }
-            const configEnabled = !!(endpointUrl || endpointAuthHeader);
+            const configEnabled = !!(endpointRequest && endpointRequest.url);
             if (el('logging-config-enabled')) el('logging-config-enabled').checked = configEnabled;
             if (el('logging-config-fields')) el('logging-config-fields').style.display = configEnabled ? 'block' : 'none';
             if (el('logging-secret-wrap')) el('logging-secret-wrap').style.display = configEnabled ? 'block' : 'none';
@@ -724,7 +836,7 @@
              setOutboundAuthEnabled(!!d.enabled);
              if (el('kr-enabled')) el('kr-enabled').checked = !!d.enabled;
              if (el('kr-strategy')) el('kr-strategy').value = d.strategy || 'json_ttl';
-             if (el('kr-request-yaml')) el('kr-request-yaml').value = String(d.request_yaml || '');
+             if (el('kr-request-form')) setRequestForm('kr', d.request || {});
              if (el('kr-key-path')) el('kr-key-path').value = String(d.key_path || '');
              if (el('kr-ttl-path')) el('kr-ttl-path').value = d.ttl_path == null ? '' : String(d.ttl_path);
              if (el('kr-ttl-unit')) el('kr-ttl-unit').value = d.ttl_unit || 'seconds';
@@ -762,10 +874,11 @@
               clearDirty('outbound-auth');
               return;
             }
+             const req = readRequestForm('kr');
              const payload = {
                enabled: outboundAuthEnabled,
                strategy: (el('kr-strategy')?.value || 'json_ttl'),
-               request_yaml: el('kr-request-yaml')?.value || '',
+               request: req,
                key_path: el('kr-key-path')?.value || '',
                ttl_path: el('kr-ttl-path')?.value || null,
                ttl_unit: el('kr-ttl-unit')?.value || 'seconds',
@@ -787,6 +900,7 @@
             const inboundEnabled = !!el('jwt-inbound-enabled')?.checked;
             const outboundEnabled = !!el('jwt-outbound-enabled')?.checked;
             const inboundMode = el('jwt-inbound-mode')?.value || 'shared_secret';
+            const jwksRequest = readRequestForm('jwt-jwks');
             const jwtConfig = {
               enabled: jwtEnabled,
               inbound: {
@@ -796,7 +910,7 @@
                 scheme: normalizeOptionalString(el('jwt-inbound-scheme')?.value),
                 issuer: normalizeOptionalString(el('jwt-inbound-issuer')?.value),
                 audience: normalizeOptionalString(el('jwt-inbound-audience')?.value),
-                jwks_url: inboundMode === 'jwks' ? normalizeOptionalString(el('jwt-inbound-jwks-url')?.value) : null,
+                http_request: inboundMode === 'jwks' ? jwksRequest : null,
                 clock_skew_seconds: normalizeOptionalInt(el('jwt-inbound-skew')?.value),
               },
               outbound: {
@@ -828,7 +942,7 @@
             const payload = {
               enabled: !!d.enabled,
               strategy: d.strategy || 'json_ttl',
-              request_yaml: d.request_yaml || '',
+              request: d.request || {},
               key_path: d.key_path || '',
               ttl_path: d.ttl_path ?? null,
               ttl_unit: d.ttl_unit || 'seconds',
@@ -870,7 +984,7 @@
             const payload = {
               enabled: !!d.enabled,
               strategy: d.strategy || 'json_ttl',
-              request_yaml: d.request_yaml || '',
+              request: d.request || {},
               key_path: d.key_path || '',
               ttl_path: d.ttl_path ?? null,
               ttl_unit: d.ttl_unit || 'seconds',
@@ -1133,8 +1247,10 @@
             }
             updateInboundHeaderFilteringHelp(el('inbound-header-filtering-mode')?.value || 'blacklist');
             if (el('outbound-default-expr')) el('outbound-default-expr').value = String(outbound.defaultExpr || '');
+            if (el('outbound-custom-js')) el('outbound-custom-js').value = outbound.custom_js_preprocessor || '';
             if (el('outbound-fallback')) el('outbound-fallback').value = String(outbound.fallback || 'passthrough');
             if (el('inbound-default-expr')) el('inbound-default-expr').value = String(inbound.defaultExpr || '');
+            if (el('inbound-custom-js')) el('inbound-custom-js').value = inbound.custom_js_preprocessor || '';
             if (el('inbound-fallback')) el('inbound-fallback').value = String(inbound.fallback || 'passthrough');
             outboundRuleDrafts = Array.isArray(outbound.rules) ? outbound.rules.map(normalizeRuleForUi) : [];
             inboundRuleDrafts = Array.isArray(inbound.rules) ? inbound.rules.map(normalizeRuleForUi) : [];
@@ -1155,12 +1271,14 @@
               enabled: globalEnabled,
               outbound: {
                 enabled: true,
+                custom_js_preprocessor: (el('outbound-custom-js')?.value || '').trim() || null,
                 defaultExpr: el('outbound-default-expr')?.value || '',
                 fallback: el('outbound-fallback')?.value || 'passthrough',
                 rules: outboundRules,
               },
               inbound: {
                 enabled: true,
+                custom_js_preprocessor: (el('inbound-custom-js')?.value || '').trim() || null,
                 defaultExpr: el('inbound-default-expr')?.value || '',
                 fallback: el('inbound-fallback')?.value || 'passthrough',
                 header_filtering: {
@@ -1195,59 +1313,12 @@
           rule.headers.splice(headerIndex, 1);
           renderTransformRules(kind);
         }
-        function sandboxPathToSuffix(path) {
-           if (path === SANDBOX_API_PREFIX) return '';
-           if (path.startsWith(SANDBOX_API_PREFIX + '/')) return path.slice((SANDBOX_API_PREFIX + '/').length);
-           return null;
-         }
-         function sandboxBuildUrlFromSelection() {
-           const suffix = el('sandbox-path')?.value || '';
-           const base = window.location.origin || '';
-           return base + SANDBOX_API_PREFIX + (suffix ? '/' + suffix : '');
-         }
-         function sandboxUpdateBaseUrlDisplay() {
-           const suffix = el('sandbox-path')?.value || '';
-           const node = el('sandbox-base-url');
-           if (!node) return;
-           const base = window.location.origin || '';
-           node.textContent = base + SANDBOX_API_PREFIX + (suffix ? '/' + suffix : '');
-         }
          function sandboxUpdateAuthValueVisibility() {
            const mode = el('sandbox-auth-mode')?.value || 'admin_token';
            const wrap = el('sandbox-auth-value-wrap');
            if (!wrap) return;
            const needsValue = mode === 'admin_key' || mode === 'proxy_key' || mode === 'issuer_key';
            wrap.style.display = needsValue ? 'block' : 'none';
-         }
-         function sandboxSyncUrlFromSelection() {
-           if (sandboxSyncingControls) return;
-           const node = el('sandbox-url');
-           if (node) node.value = sandboxBuildUrlFromSelection();
-           sandboxUpdateBaseUrlDisplay();
-           sandboxPreviewRequest();
-         }
-         function sandboxFindTemplate(method, suffix) {
-           const m = String(method || '').toUpperCase();
-           const s = String(suffix || '');
-           const entries = Object.entries(SANDBOX_TEMPLATES);
-           for (const [key, tpl] of entries) {
-             const tplSuffix = sandboxPathToSuffix(String(tpl.path || ''));
-             if (tplSuffix === null) continue;
-             if (String(tpl.method || '').toUpperCase() === m && tplSuffix === s) {
-               return { key, tpl };
-             }
-           }
-          return null;
-         }
-         function sandboxMethodsForSuffix(suffix) {
-           const s = String(suffix || '');
-           const methods = Array.from(new Set(
-             Object.values(SANDBOX_TEMPLATES)
-               .filter((tpl) => sandboxPathToSuffix(String(tpl.path || '')) === s)
-               .map((tpl) => String(tpl.method || '').toUpperCase())
-               .filter(Boolean)
-           ));
-           return methods.sort();
          }
          function sandboxRedactHeader(name, value) {
            const n = String(name || '').toLowerCase();
@@ -1278,73 +1349,44 @@
            }
            return lines.join('\n');
          }
-         function sandboxRenderSelectors() {
-           const verbNode = el('sandbox-verb');
-           const pathNode = el('sandbox-path');
-           const baseNode = el('sandbox-base-url');
-           if (!verbNode || !pathNode) return;
-           if (baseNode) baseNode.textContent = (window.location.origin || '') + SANDBOX_API_PREFIX;
-           const paths = Array.from(new Set(
-             Object.values(SANDBOX_TEMPLATES)
-               .map((t) => sandboxPathToSuffix(String(t.path || '')))
-               .filter((v) => v !== null)
-           )).sort((a, b) => a.localeCompare(b));
-           pathNode.innerHTML = paths.map((p) => {
-             const label = p || '(root)';
-             return '<option value="' + p + '">' + label + '</option>';
-           }).join('');
-           const initialSuffix = pathNode.value || paths[0] || '';
-           const methods = sandboxMethodsForSuffix(initialSuffix);
-           verbNode.innerHTML = methods.map((v) => '<option value="' + v + '">' + v + '</option>').join('');
+         function sandboxTemplateUrl(tpl) {
+           const path = String(tpl?.path || '').trim();
+           if (!path) return (window.location.origin || '') + SANDBOX_API_PREFIX;
+           if (path.startsWith('http://') || path.startsWith('https://')) return path;
+           const base = window.location.origin || '';
+           return base + path;
+         }
+         function sandboxRenderTemplates() {
+           const node = el('sandbox-template');
+           if (!node) return;
+           const entries = Object.entries(SANDBOX_TEMPLATES);
+           node.innerHTML = entries
+             .map(([key, tpl]) => '<option value="' + key + '">' + htmlEscape(tpl.label || key) + '</option>')
+             .join('');
          }
          function sandboxApplyTemplate(key) {
            const tpl = SANDBOX_TEMPLATES[key];
            if (!tpl) return;
            sandboxTemplateKey = key;
-           const suffix = sandboxPathToSuffix(String(tpl.path || ''));
-           if (suffix !== null) {
-             sandboxSyncingControls = true;
-             if (el('sandbox-path')) el('sandbox-path').value = suffix;
-             const methods = sandboxMethodsForSuffix(suffix);
-             if (el('sandbox-verb')) {
-               el('sandbox-verb').innerHTML = methods.map((m) => '<option value="' + m + '">' + m + '</option>').join('');
-               el('sandbox-verb').value = String(tpl.method || 'GET').toUpperCase();
-             }
-             sandboxSyncingControls = false;
-             sandboxSyncUrlFromSelection();
-           }
            if (el('sandbox-auth-mode')) el('sandbox-auth-mode').value = tpl.auth_mode || 'admin_token';
            sandboxUpdateAuthValueVisibility();
-           if (el('sandbox-extra-headers')) el('sandbox-extra-headers').value = JSON.stringify(tpl.headers || {}, null, 2);
-           if (el('sandbox-body')) {
-             if (tpl.body == null) {
-               el('sandbox-body').value = '';
-             } else if (typeof tpl.body === 'string') {
-               el('sandbox-body').value = tpl.body;
-             } else {
-               el('sandbox-body').value = JSON.stringify(tpl.body, null, 2);
-             }
+           const headers = tpl.headers && typeof tpl.headers === 'object' && !Array.isArray(tpl.headers) ? tpl.headers : {};
+           let bodyObj = null;
+           if (tpl.body == null) {
+             bodyObj = { type: 'none' };
+           } else if (typeof tpl.body === 'string') {
+             bodyObj = { type: 'raw', raw: tpl.body };
+           } else {
+             bodyObj = { type: 'json', value: tpl.body };
            }
-           setOutput('sandbox-request', 'Template selected: ' + tpl.label);
-         }
-         function sandboxApplyTemplateForSelection() {
-           const suffix = el('sandbox-path')?.value || '';
-           const requestedMethod = el('sandbox-verb')?.value || '';
-           const methods = sandboxMethodsForSuffix(suffix);
-           if (el('sandbox-verb')) {
-             el('sandbox-verb').innerHTML = methods.map((m) => '<option value="' + m + '">' + m + '</option>').join('');
-             if (methods.includes(requestedMethod)) {
-               el('sandbox-verb').value = requestedMethod;
-             }
-           }
-           const method = el('sandbox-verb')?.value || methods[0] || 'GET';
-           const match = sandboxFindTemplate(method, suffix);
-           if (match) {
-             sandboxApplyTemplate(match.key);
-             return;
-           }
-           sandboxTemplateKey = '';
-           sandboxSyncUrlFromSelection();
+           setRequestForm('sandbox', {
+             method: tpl.method || 'GET',
+             url: sandboxTemplateUrl(tpl),
+             headers,
+             body: bodyObj,
+           });
+           setOutput('sandbox-request', 'Template selected: ' + (tpl.label || key));
+           sandboxPreviewRequest();
          }
          function sandboxBuildAuthHeader(mode, value) {
            const v = String(value || '').trim();
@@ -1357,22 +1399,11 @@
          }
          function sandboxComputeRequestPreview() {
            const method = String(el('sandbox-verb')?.value || 'GET').toUpperCase();
-           const suffix = String(el('sandbox-path')?.value || '');
-           const tplMatch = sandboxFindTemplate(method, suffix);
-           const tpl = tplMatch ? tplMatch.tpl : null;
            const authMode = el('sandbox-auth-mode')?.value || 'admin_token';
            const authValue = el('sandbox-auth-value')?.value || '';
-           const url = String(el('sandbox-url')?.value || sandboxBuildUrlFromSelection()).trim();
-           let extraHeaders = {};
-           const rawHeaders = el('sandbox-extra-headers')?.value || '{}';
-           if (rawHeaders.trim()) {
-             extraHeaders = JSON.parse(rawHeaders);
-           }
-           if (!extraHeaders || typeof extraHeaders !== 'object' || Array.isArray(extraHeaders)) {
-             throw new Error('Request Headers must be a JSON object.');
-           }
-           const templateHeaders = (tpl && tpl.headers && typeof tpl.headers === 'object' && !Array.isArray(tpl.headers)) ? tpl.headers : {};
-           const headers = { ...templateHeaders, ...extraHeaders, ...sandboxBuildAuthHeader(authMode, authValue) };
+           const url = String(el('sandbox-url')?.value || '').trim();
+           const extraHeaders = headersMultilineToObject(el('sandbox-headers')?.value || '');
+           const headers = { ...extraHeaders, ...sandboxBuildAuthHeader(authMode, authValue) };
            const bodyText = el('sandbox-body')?.value ?? '';
            return { method, url, headers, bodyText };
          }
@@ -1383,17 +1414,6 @@
           } catch (e) {
             setOutput('sandbox-request', String(e.message || e));
           }
-        }
-        function toggleSandboxSection(toggleId, wrapId) {
-          const link = el(toggleId);
-          const wrap = el(wrapId);
-          if (!link || !wrap) return;
-          link.addEventListener('click', (evt) => {
-            evt.preventDefault();
-            const hidden = wrap.style.display === 'none';
-            wrap.style.display = hidden ? 'block' : 'none';
-            link.textContent = hidden ? 'hide' : 'show';
-          });
         }
          async function sandboxSend() {
            try {
@@ -1425,12 +1445,14 @@
            }
          }
          function sandboxInit() {
-           if (!el('sandbox-verb') || !el('sandbox-path')) return;
-           sandboxRenderSelectors();
-           if (!sandboxTemplateKey) sandboxApplyTemplate('request_passthrough');
+           if (!el('sandbox-verb') || !el('sandbox-url')) return;
+           sandboxRenderTemplates();
+           if (el('sandbox-template')) {
+             const defaultKey = SANDBOX_TEMPLATES.request_passthrough ? 'request_passthrough' : Object.keys(SANDBOX_TEMPLATES)[0];
+             el('sandbox-template').value = defaultKey;
+             sandboxApplyTemplate(defaultKey);
+           }
            sandboxUpdateAuthValueVisibility();
-           sandboxUpdateBaseUrlDisplay();
-           sandboxSyncUrlFromSelection();
            sandboxPreviewRequest();
          }
         async function headersList() {
@@ -1614,9 +1636,17 @@
           }
         }
 
-         function bind() {
+        function bind() {
           attachTabs();
           updateProxyHeader('');
+          if (el('sandbox-request-form')) setHtml('sandbox-request-form', renderRequestForm('sandbox'));
+          if (el('kr-request-form')) setHtml('kr-request-form', renderRequestForm('kr'));
+          if (el('jwt-jwks-request-form')) {
+            setHtml('jwt-jwks-request-form', renderRequestForm('jwt-jwks'));
+          }
+          if (el('logging-request-form')) {
+            setHtml('logging-request-form', renderRequestForm('logging-req'));
+          }
           if (el('jwt-endpoint-url')) el('jwt-endpoint-url').value = window.location.origin + '/_apiproxy/jwt';
           document.querySelectorAll('.tab-panel').forEach((panel) => {
             const name = panel.id.replace('tab-', '');
@@ -1705,7 +1735,7 @@
              evt.preventDefault();
              openConfigTab();
            });
-          el('footer-save-logging')?.addEventListener('click', loggingSecretSave);
+          el('footer-save-logging')?.addEventListener('click', loggingSave);
           el('logging-secret-delete-btn')?.addEventListener('click', loggingSecretDelete);
            el('config-reload-link')?.addEventListener('click', (evt) => {
              evt.preventDefault();
@@ -1911,20 +1941,20 @@
            el('rotate-proxy-btn')?.addEventListener('click', rotateProxy);
            el('rotate-issuer-btn')?.addEventListener('click', rotateIssuer);
            el('rotate-admin-btn')?.addEventListener('click', rotateAdmin);
-          el('sandbox-verb')?.addEventListener('change', sandboxApplyTemplateForSelection);
-          el('sandbox-path')?.addEventListener('change', sandboxApplyTemplateForSelection);
+          el('sandbox-template')?.addEventListener('change', (evt) => {
+            const key = evt.target?.value || '';
+            if (key) sandboxApplyTemplate(String(key));
+          });
+          el('sandbox-verb')?.addEventListener('change', sandboxPreviewRequest);
           el('sandbox-auth-mode')?.addEventListener('change', () => {
             sandboxUpdateAuthValueVisibility();
             sandboxPreviewRequest();
           });
           el('sandbox-auth-value')?.addEventListener('input', sandboxPreviewRequest);
           el('sandbox-url')?.addEventListener('input', sandboxPreviewRequest);
-          el('sandbox-extra-headers')?.addEventListener('input', sandboxPreviewRequest);
+          el('sandbox-headers')?.addEventListener('input', sandboxPreviewRequest);
           el('sandbox-body')?.addEventListener('input', sandboxPreviewRequest);
           el('sandbox-send-btn')?.addEventListener('click', sandboxSend);
-          toggleSandboxSection('sandbox-url-toggle', 'sandbox-url-wrap');
-          toggleSandboxSection('sandbox-headers-toggle', 'sandbox-headers-wrap');
-          toggleSandboxSection('sandbox-body-toggle', 'sandbox-body-wrap');
            try {
              const token = sessionStorage.getItem(ADMIN_ACCESS_TOKEN_STORAGE) || '';
             if (token) {

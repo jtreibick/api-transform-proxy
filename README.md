@@ -102,16 +102,28 @@ debug:
 
 transform:
   enabled: true
-  defaultExpr: ""
-  fallback: passthrough # passthrough | error | transform_default
-  rules:
-    - name: errors_json
-      status: [4xx, 5xx, 422] # mix classes + exact codes
-      type: json              # json | text | binary | any
-      headerMatch:
-        x-api-mode: legacy    # optional
-      expr: |
-        { "ok": false, "status": status, "error": body }
+  outbound:
+    enabled: true
+    custom_js_preprocessor: null
+    defaultExpr: ""
+    fallback: passthrough
+    rules: []
+  inbound:
+    enabled: true
+    custom_js_preprocessor: null
+    defaultExpr: ""
+    fallback: passthrough
+    header_filtering:
+      mode: blacklist
+      names: []
+    rules:
+      - name: errors_json
+        status: [4xx, 5xx, 422] # mix classes + exact codes
+        type: json              # json | text | binary | any
+        headerMatch:
+          x-api-mode: legacy    # optional
+        expr: |
+          { "ok": false, "status": status, "error": body }
 
 header_forwarding:
   mode: blacklist            # blacklist | whitelist
@@ -155,9 +167,21 @@ BOOTSTRAP_CONFIG_YAML = """
 targetHost: null
 transform:
   enabled: true
-  defaultExpr: ""
-  fallback: passthrough
-  rules: []
+  outbound:
+    enabled: true
+    custom_js_preprocessor: null
+    defaultExpr: ""
+    fallback: passthrough
+    rules: []
+  inbound:
+    enabled: true
+    custom_js_preprocessor: null
+    defaultExpr: ""
+    fallback: passthrough
+    header_filtering:
+      mode: blacklist
+      names: []
+    rules: []
 header_forwarding:
   mode: blacklist
   names:
@@ -217,6 +241,38 @@ Wrangler-native KV provisioning:
   - Browser admin console for all admin endpoints.
   - Prompts for `X-Admin-Key`, exchanges it for short-lived access token, then provides UI controls for Status, Enrichments, Logging, Outbound Auth, Inbound Auth, API Sandbox, and Config.
   - Logging Endpoint URL + Logging Auth Header are read from YAML config (`debug.loggingEndpoint`) and show blank when not set.
+
+## Custom JavaScript Preprocessors
+
+You can plug custom JS into the transform pipeline by editing `src/custom/preprocessors.js` and referencing the hook names in config:
+
+- `transform.outbound.custom_js_preprocessor` (runs after request parse, before outbound JSONata)
+- `transform.inbound.custom_js_preprocessor` (runs after response parse, before inbound JSONata)
+
+Example hook file:
+
+```js
+export const PREPROCESSORS = {
+  outbound_preprocess(input) {
+    // input = { upstream, request_headers }
+    return input;
+  },
+  inbound_preprocess(input) {
+    // input = { status, headers, type, content_type, body }
+    return input;
+  },
+};
+```
+
+Set the hook name in YAML:
+
+```yaml
+transform:
+  outbound:
+    custom_js_preprocessor: outbound_preprocess
+  inbound:
+    custom_js_preprocessor: inbound_preprocess
+```
 - `POST /_apiproxy/admin/access-token`
   - Requires header `X-Admin-Key`.
   - Response: `{ "ok": true, "data": { "access_token": "...", "expires_at_ms": 123, "ttl_seconds": 3600 } }`

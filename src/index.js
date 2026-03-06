@@ -12,6 +12,7 @@ import {
 } from "./ui.js";
 import { createCloudflareStorage } from "./internal/cloudflare/storage/index.js";
 import { StorageConnectorError } from "./common/storage/interface.js";
+import { PREPROCESSORS } from "./custom/preprocessors.js";
 
 /**
  * API transform relay for Bubble-style clients.
@@ -95,7 +96,7 @@ const CONFIG_SCHEMA_V1 = {
       scheme: "string|null",
       issuer: "string|null",
       audience: "string|null",
-      jwks_url: "string|null",
+      http_request: "object|null",
       clock_skew_seconds: "integer>=0",
     },
     outbound: {
@@ -131,15 +132,14 @@ const CONFIG_SCHEMA_V1 = {
   debug: {
     max_debug_session_seconds: "integer (1-604800)",
     loggingEndpoint: {
-      url: "string|null",
-      auth_header: "string|null",
-      auth_value: "string|null",
+      http_request: "object|null",
     },
   },
   transform: {
     enabled: "boolean",
     outbound: {
       enabled: "boolean",
+      custom_js_preprocessor: "string|null",
       defaultExpr: "string",
       fallback: "passthrough|error|transform_default",
       rules: [
@@ -154,6 +154,7 @@ const CONFIG_SCHEMA_V1 = {
     },
     inbound: {
       enabled: "boolean",
+      custom_js_preprocessor: "string|null",
       defaultExpr: "string",
       fallback: "passthrough|error|transform_default",
       header_filtering: {
@@ -231,7 +232,7 @@ const DEFAULT_CONFIG_V1 = {
       scheme: "Bearer",
       issuer: null,
       audience: null,
-      jwks_url: null,
+      http_request: null,
       clock_skew_seconds: 0,
     },
     outbound: {
@@ -275,21 +276,21 @@ const DEFAULT_CONFIG_V1 = {
   debug: {
     max_debug_session_seconds: 3600,
     loggingEndpoint: {
-      url: null,
-      auth_header: null,
-      auth_value: null,
+      http_request: null,
     },
   },
   transform: {
     enabled: true,
     outbound: {
       enabled: false,
+      custom_js_preprocessor: null,
       defaultExpr: "",
       fallback: "passthrough",
       rules: [],
     },
     inbound: {
       enabled: true,
+      custom_js_preprocessor: null,
       defaultExpr: "",
       fallback: "passthrough",
       header_filtering: {
@@ -582,6 +583,55 @@ function isNonArrayObject(v) {
 function normalizeHeaderName(name) {
   return String(name || "").trim().toLowerCase();
 }
+function resolveCustomHook(name) {
+  const key = String(name || "").trim();
+  if (!key) return null;
+  const fn = PREPROCESSORS?.[key];
+  return typeof fn === "function" ? fn : null;
+}
+function normalizeHttpRequestConfig(input, path, problems, requireUrl) {
+  if (input === undefined || input === null) return null;
+  if (!isNonArrayObject(input)) {
+    pushProblem(problems, path, "must be an object or null");
+    return null;
+  }
+  const methodRaw = input.method === undefined || input.method === null ? "GET" : String(input.method || "").trim();
+  const method = methodRaw ? methodRaw.toUpperCase() : "GET";
+  const urlRaw = input.url === undefined || input.url === null ? "" : String(input.url || "").trim();
+  if (requireUrl && !urlRaw) {
+    pushProblem(problems, path + ".url", "must be provided");
+  }
+  if (urlRaw) {
+    try {
+      const u = new URL(urlRaw);
+      if (u.protocol !== "https:") {
+        pushProblem(problems, path + ".url", "must use https");
+      }
+    } catch {
+      pushProblem(problems, path + ".url", "must be a valid URL");
+    }
+  }
+  let headers = {};
+  if (input.headers !== undefined && input.headers !== null) {
+    if (!isNonArrayObject(input.headers)) {
+      pushProblem(problems, path + ".headers", "must be an object");
+    } else {
+      headers = {};
+      for (const [k, v] of Object.entries(input.headers)) {
+        const name = String(k || "").trim();
+        if (!name) continue;
+        headers[name] = String(v ?? "");
+      }
+    }
+  }
+  const body = input.body !== undefined ? input.body : null;
+  return {
+    method,
+    url: urlRaw || null,
+    headers,
+    body,
+  };
+}
 
 function base64UrlEncodeBytes(bytes) {
   let binary = "";
@@ -671,7 +721,46 @@ function assertJwtClaims(payload, cfg) {
 
 let JWKS_CACHE = { url: "", fetchedAt: 0, keys: [] };
 
-async function fetchJwks(url) {
+function buildHttpRequestInit(req) {
+  const method = String(req?.method || "GET").toUpperCase();
+  const headers = new Headers();
+  if (isNonArrayObject(req?.headers)) {
+    for (const [k, v] of Object.entries(req.headers)) {
+      headers.set(k, String(v ?? ""));
+    }
+  }
+  let body;
+  if (method !== "GET" && method !== "HEAD") {
+    const b = isNonArrayObject(req?.body) ? req.body : { type: "none" };
+    const bodyType = String(b.type || "none").toLowerCase();
+    if (bodyType === "json") {
+      if (!headers.has("content-type")) headers.set("content-type", "application/json");
+      body = JSON.stringify(b.value ?? {});
+    } else if (bodyType === "urlencoded") {
+      if (!headers.has("content-type")) headers.set("content-type", "application/x-www-form-urlencoded");
+      if (typeof b.raw === "string") {
+        body = b.raw;
+      } else {
+        const params = new URLSearchParams();
+        const source = isPlainObject(b.value) ? b.value : {};
+        for (const [k, v] of Object.entries(source)) params.append(k, String(v));
+        body = params.toString();
+      }
+    } else if (bodyType === "raw") {
+      if (typeof b.content_type === "string" && b.content_type) {
+        headers.set("content-type", b.content_type);
+      }
+      body = typeof b.raw === "string" ? b.raw : "";
+    }
+  }
+  return { method, headers, body };
+}
+
+async function fetchJwks(requestConfig) {
+  const url = String(requestConfig?.url || "").trim();
+  if (!url) {
+    throw new HttpError(401, "JWT_INVALID", "JWKS request URL is required");
+  }
   const now = Date.now();
   if (JWKS_CACHE.url === url && now - JWKS_CACHE.fetchedAt < JWKS_CACHE_TTL_MS) {
     return JWKS_CACHE.keys;
@@ -680,7 +769,8 @@ async function fetchJwks(url) {
   const timeout = setTimeout(() => controller.abort(), 5000);
   let res;
   try {
-    res = await fetch(url, { signal: controller.signal });
+    const init = buildHttpRequestInit(requestConfig);
+    res = await fetch(url, { ...init, signal: controller.signal });
   } catch (e) {
     throw new HttpError(502, "JWKS_FETCH_FAILED", "Failed to fetch JWKS");
   } finally {
@@ -713,9 +803,8 @@ async function verifyJwtRs256(token, cfg) {
   if (String(header.alg || "").toUpperCase() !== "RS256") {
     throw new HttpError(401, "JWT_INVALID", "JWT alg must be RS256");
   }
-  const jwksUrl = cfg?.jwks_url;
-  if (!jwksUrl) throw new HttpError(401, "JWT_INVALID", "JWKS URL is required");
-  const keys = await fetchJwks(jwksUrl);
+  const jwksRequest = cfg?.http_request;
+  const keys = await fetchJwks(jwksRequest);
   if (!keys.length) throw new HttpError(401, "JWT_INVALID", "JWKS contains no keys");
   const kid = header.kid;
   let jwk = null;
@@ -994,7 +1083,7 @@ function validateAndNormalizeConfigV1(configInput) {
   if (isNonArrayObject(jwtInboundIn)) {
     ensureNoUnknownKeys(
       jwtInboundIn,
-      new Set(["enabled", "mode", "header", "scheme", "issuer", "audience", "jwks_url", "clock_skew_seconds"]),
+      new Set(["enabled", "mode", "header", "scheme", "issuer", "audience", "http_request", "clock_skew_seconds"]),
       "$.jwt.inbound",
       problems
     );
@@ -1016,20 +1105,12 @@ function validateAndNormalizeConfigV1(configInput) {
     jwtInboundSchemeRaw === undefined || jwtInboundSchemeRaw === null ? "Bearer" : String(jwtInboundSchemeRaw || "").trim();
   const jwtInboundIssuer = jwtInboundIn.issuer === undefined || jwtInboundIn.issuer === null ? null : String(jwtInboundIn.issuer || "").trim();
   const jwtInboundAudience = jwtInboundIn.audience === undefined || jwtInboundIn.audience === null ? null : String(jwtInboundIn.audience || "").trim();
-  const jwtInboundJwksUrl = jwtInboundIn.jwks_url === undefined || jwtInboundIn.jwks_url === null ? null : String(jwtInboundIn.jwks_url || "").trim();
-  if (jwtInboundMode === "jwks" && jwtInboundEnabled && !jwtInboundJwksUrl) {
-    pushProblem(problems, "$.jwt.inbound.jwks_url", "must be provided when mode is jwks");
-  }
-  if (jwtInboundJwksUrl) {
-    try {
-      const u = new URL(jwtInboundJwksUrl);
-      if (u.protocol !== "https:") {
-        pushProblem(problems, "$.jwt.inbound.jwks_url", "must use https");
-      }
-    } catch {
-      pushProblem(problems, "$.jwt.inbound.jwks_url", "must be a valid URL");
-    }
-  }
+  const jwtInboundHttpRequest = normalizeHttpRequestConfig(
+    isNonArrayObject(jwtInboundIn) ? jwtInboundIn.http_request : null,
+    "$.jwt.inbound.http_request",
+    problems,
+    jwtInboundMode === "jwks" && jwtInboundEnabled
+  );
   const jwtInboundSkewRaw = jwtInboundIn.clock_skew_seconds;
   const jwtInboundSkew = jwtInboundSkewRaw === undefined || jwtInboundSkewRaw === null ? 0 : Number(jwtInboundSkewRaw);
   if (!Number.isInteger(jwtInboundSkew) || jwtInboundSkew < 0) {
@@ -1165,7 +1246,7 @@ function validateAndNormalizeConfigV1(configInput) {
       pushProblem(problems, path, "must be an object");
       return { enabled: direction === "inbound", defaultExpr: "", fallback: "passthrough", rules: [] };
     }
-    ensureNoUnknownKeys(src, new Set(["enabled", "defaultExpr", "fallback", "rules", "header_filtering"]), path, problems);
+    ensureNoUnknownKeys(src, new Set(["enabled", "defaultExpr", "fallback", "rules", "header_filtering", "custom_js_preprocessor"]), path, problems);
     const sectionEnabled = src.enabled === undefined ? (direction === "inbound") : src.enabled;
     if (typeof sectionEnabled !== "boolean") {
       pushProblem(problems, `${path}.enabled`, "must be a boolean");
@@ -1199,6 +1280,9 @@ function validateAndNormalizeConfigV1(configInput) {
     }
     return {
       enabled: !!sectionEnabled,
+      custom_js_preprocessor: src.custom_js_preprocessor === undefined || src.custom_js_preprocessor === null
+        ? null
+        : String(src.custom_js_preprocessor || "").trim() || null,
       defaultExpr: typeof sectionDefaultExpr === "string" ? sectionDefaultExpr : "",
       fallback: VALID_FALLBACK_VALUES.has(sectionFallback) ? sectionFallback : "passthrough",
       header_filtering: headerFiltering,
@@ -1244,47 +1328,14 @@ function validateAndNormalizeConfigV1(configInput) {
     pushProblem(problems, "$.debug.loggingEndpoint", "must be an object when provided");
   }
   if (isNonArrayObject(loggingUrlIn)) {
-    ensureNoUnknownKeys(loggingUrlIn, new Set(["url", "auth_header", "auth_value"]), "$.debug.loggingEndpoint", problems);
+    ensureNoUnknownKeys(loggingUrlIn, new Set(["http_request"]), "$.debug.loggingEndpoint", problems);
   }
-  const sinkUrlRaw = isNonArrayObject(loggingUrlIn) ? loggingUrlIn.url : undefined;
-  const sinkAuthHeaderRaw = isNonArrayObject(loggingUrlIn) ? loggingUrlIn.auth_header : undefined;
-  const sinkAuthValueRaw = isNonArrayObject(loggingUrlIn) ? loggingUrlIn.auth_value : undefined;
-  let sinkUrl = null;
-  if (sinkUrlRaw !== undefined && sinkUrlRaw !== null) {
-    if (typeof sinkUrlRaw !== "string" || !sinkUrlRaw.trim()) {
-      pushProblem(problems, "$.debug.loggingEndpoint.url", "must be a non-empty string or null");
-    } else {
-      sinkUrl = sinkUrlRaw.trim();
-      try {
-        const u = new URL(sinkUrl);
-        if (u.protocol !== "https:") {
-          pushProblem(problems, "$.debug.loggingEndpoint.url", "must use https");
-        }
-      } catch {
-        pushProblem(problems, "$.debug.loggingEndpoint.url", "must be a valid URL");
-      }
-    }
-  }
-  let sinkAuthHeader = null;
-  if (sinkAuthHeaderRaw !== undefined && sinkAuthHeaderRaw !== null) {
-    if (typeof sinkAuthHeaderRaw !== "string" || !sinkAuthHeaderRaw.trim()) {
-      pushProblem(problems, "$.debug.loggingEndpoint.auth_header", "must be a non-empty string or null");
-    } else {
-      try {
-        sinkAuthHeader = assertValidHeaderName(sinkAuthHeaderRaw.trim());
-      } catch {
-        pushProblem(problems, "$.debug.loggingEndpoint.auth_header", "must be a valid header name");
-      }
-    }
-  }
-  let sinkAuthValue = null;
-  if (sinkAuthValueRaw !== undefined && sinkAuthValueRaw !== null) {
-    if (typeof sinkAuthValueRaw !== "string" || !sinkAuthValueRaw.trim()) {
-      pushProblem(problems, "$.debug.loggingEndpoint.auth_value", "must be a non-empty string or null");
-    } else {
-      sinkAuthValue = sinkAuthValueRaw;
-    }
-  }
+  const sinkHttpRequest = normalizeHttpRequestConfig(
+    isNonArrayObject(loggingUrlIn) ? loggingUrlIn.http_request : null,
+    "$.debug.loggingEndpoint.http_request",
+    problems,
+    false
+  );
 
   const headerForwardingIn = input.header_forwarding ?? {};
   if (!isNonArrayObject(headerForwardingIn)) {
@@ -1339,7 +1390,7 @@ function validateAndNormalizeConfigV1(configInput) {
         scheme: jwtInboundScheme || null,
         issuer: jwtInboundIssuer || null,
         audience: jwtInboundAudience || null,
-        jwks_url: jwtInboundJwksUrl || null,
+        http_request: jwtInboundHttpRequest || null,
         clock_skew_seconds: Number.isInteger(jwtInboundSkew) ? jwtInboundSkew : 0,
       },
       outbound: {
@@ -1375,9 +1426,7 @@ function validateAndNormalizeConfigV1(configInput) {
     debug: {
       max_debug_session_seconds: maxTtlSeconds,
       loggingEndpoint: {
-        url: sinkUrl,
-        auth_header: sinkAuthHeader,
-        auth_value: sinkAuthValue,
+        http_request: sinkHttpRequest || null,
       },
     },
     transform: {
@@ -2703,6 +2752,7 @@ async function handleKeyRotationConfigGet(env) {
       enabled: !!section.enabled,
       strategy: String(section.strategy || "json_ttl"),
       request_yaml: await stringifyYamlConfig(section.request || {}),
+      request: section.request || {},
       key_path: String(section?.response?.key_path || ""),
       ttl_path: section?.response?.ttl_path ?? null,
       ttl_unit: String(section?.response?.ttl_unit || "seconds"),
@@ -2722,24 +2772,27 @@ async function handleKeyRotationConfigPut(request, env) {
   const body = await readJsonWithLimit(request, getEnvInt(env, "MAX_REQ_BYTES", DEFAULTS.MAX_REQ_BYTES));
   const existing = await loadConfigV1(env);
 
-  const requestYaml = String(body?.request_yaml || "").trim();
-  if (!requestYaml) {
-    throw new HttpError(400, "INVALID_REQUEST", "request_yaml is required", {
-      expected: { request_yaml: "method: POST\\nurl: https://..." },
-    });
-  }
-
-  let requestObj;
-  try {
-    const yaml = await loadYamlApi();
-    requestObj = yaml.parse(requestYaml);
-  } catch (e) {
-    throw new HttpError(400, "INVALID_REQUEST", "request_yaml could not be parsed", {
-      cause: String(e?.message || e),
-    });
-  }
-  if (!isNonArrayObject(requestObj)) {
-    throw new HttpError(400, "INVALID_REQUEST", "request_yaml must parse to an object");
+  let requestObj = null;
+  if (isNonArrayObject(body?.request)) {
+    requestObj = body.request;
+  } else {
+    const requestYaml = String(body?.request_yaml || "").trim();
+    if (!requestYaml) {
+      throw new HttpError(400, "INVALID_REQUEST", "request_yaml or request is required", {
+        expected: { request_yaml: "method: POST\\nurl: https://..." },
+      });
+    }
+    try {
+      const yaml = await loadYamlApi();
+      requestObj = yaml.parse(requestYaml);
+    } catch (e) {
+      throw new HttpError(400, "INVALID_REQUEST", "request_yaml could not be parsed", {
+        cause: String(e?.message || e),
+      });
+    }
+    if (!isNonArrayObject(requestObj)) {
+      throw new HttpError(400, "INVALID_REQUEST", "request_yaml must parse to an object");
+    }
   }
 
   function toNullableInt(raw, field) {
@@ -2847,12 +2900,18 @@ async function handleTransformConfigPut(request, env) {
       enabled: body?.enabled === undefined ? currentTransform.enabled !== false : !!body.enabled,
       outbound: {
         enabled: outboundIn?.enabled === undefined ? !!currentTransform?.outbound?.enabled : !!outboundIn.enabled,
+        custom_js_preprocessor: outboundIn?.custom_js_preprocessor === undefined
+          ? (currentTransform?.outbound?.custom_js_preprocessor ?? null)
+          : (outboundIn.custom_js_preprocessor === null ? null : String(outboundIn.custom_js_preprocessor || "").trim() || null),
         defaultExpr: String(outboundIn?.defaultExpr ?? currentTransform?.outbound?.defaultExpr ?? ""),
         fallback: String(outboundIn?.fallback ?? currentTransform?.outbound?.fallback ?? "passthrough"),
         rules: outboundRules,
       },
       inbound: {
         enabled: inboundIn?.enabled === undefined ? !!currentTransform?.inbound?.enabled : !!inboundIn.enabled,
+        custom_js_preprocessor: inboundIn?.custom_js_preprocessor === undefined
+          ? (currentTransform?.inbound?.custom_js_preprocessor ?? null)
+          : (inboundIn.custom_js_preprocessor === null ? null : String(inboundIn.custom_js_preprocessor || "").trim() || null),
         defaultExpr: String(inboundIn?.defaultExpr ?? currentTransform?.inbound?.defaultExpr ?? ""),
         fallback: String(inboundIn?.fallback ?? currentTransform?.inbound?.fallback ?? "passthrough"),
         header_filtering: isPlainObject(inboundIn?.header_filtering)
@@ -2978,17 +3037,25 @@ function buildDebugTraceText(trace) {
   return text.length > DEBUG_MAX_TRACE_CHARS ? `${text.slice(0, DEBUG_MAX_TRACE_CHARS)}\n...(truncated)` : text;
 }
 
-async function pushDebugTraceToLoggingUrl(traceText, traceData, config) {
+async function pushDebugTraceToLoggingUrl(traceText, traceData, config, env) {
   const sink = config?.debug?.loggingEndpoint || {};
-  const url = typeof sink.url === "string" ? sink.url.trim() : "";
+  const req = isNonArrayObject(sink?.http_request) ? sink.http_request : null;
+  const url = String(req?.url || "").trim();
   if (!url) return { attempted: false, ok: true };
-  const headers = { "content-type": "application/json" };
-  if (sink.auth_header && sink.auth_value) {
-    headers[sink.auth_header] = String(sink.auth_value);
+  const init = buildHttpRequestInit({ ...req, method: req?.method || "POST" });
+  const secret = await kvGetValue(env, KV_DEBUG_LOGGING_SECRET);
+  const headers = new Headers(init.headers || {});
+  if (!headers.has("content-type")) headers.set("content-type", "application/json");
+  if (secret) {
+    for (const [name, value] of headers.entries()) {
+      if (String(value || "").trim() === "{{logging_secret}}") {
+        headers.set(name, secret);
+      }
+    }
   }
   try {
     const res = await fetch(url, {
-      method: "POST",
+      method: init.method || "POST",
       headers,
       body: JSON.stringify({
         trace_text: traceText,
@@ -3476,6 +3543,39 @@ async function handleRequestCore(request, env, payload, ctx) {
   }
 
   if (transformGlobalEnabled && outboundTransformConfig.enabled) {
+    const outboundHook = resolveCustomHook(outboundTransformConfig.custom_js_preprocessor);
+    if (outboundHook) {
+      let hookOutput;
+      try {
+        hookOutput = await outboundHook({
+          upstream: payload.upstream,
+          request_headers: normalizeHeaderMap(request.headers),
+        });
+      } catch (e) {
+        throw new HttpError(422, "TRANSFORM_ERROR", "Outbound custom_js_preprocessor failed", {
+          cause: String(e?.message || e),
+        });
+      }
+      let nextUpstream = null;
+      if (isPlainObject(hookOutput?.upstream)) {
+        nextUpstream = hookOutput.upstream;
+      } else if (isPlainObject(hookOutput)) {
+        nextUpstream = hookOutput;
+      }
+      if (!nextUpstream) {
+        throw new HttpError(422, "TRANSFORM_ERROR", "Outbound custom_js_preprocessor must return an object", {
+          source: "custom_js_preprocessor",
+        });
+      }
+      const nextPayload = { ...payload, upstream: nextUpstream };
+      const outboundProblems = validateInvokePayload(nextPayload, { allowMissingUrl: true });
+      if (outboundProblems.length > 0) {
+        throw new HttpError(422, "TRANSFORM_ERROR", "Outbound custom_js_preprocessor returned invalid request payload", {
+          problems: outboundProblems,
+        });
+      }
+      payload = nextPayload;
+    }
     const outboundCtx = {
       method: String(payload?.upstream?.method || "").toUpperCase(),
       path: String(payload?.upstream?.url || ""),
@@ -3650,9 +3750,10 @@ async function handleRequestCore(request, env, payload, ctx) {
   const upstreamMs = Date.now() - t0;
 
   const responseBytes = await readResponseWithLimit(upstreamResp, maxResp);
-  const contentType = getStoredContentType(upstreamResp.headers);
-  const textBody = decodeBody(responseBytes);
-  const responseHeadersMap = normalizeHeaderMap(upstreamResp.headers);
+  let contentType = getStoredContentType(upstreamResp.headers);
+  let textBody = decodeBody(responseBytes);
+  let responseHeadersMap = normalizeHeaderMap(upstreamResp.headers);
+  let responseStatus = upstreamResp.status;
   let jsonBody = null;
   let parseMs;
   let responseType = detectResponseType(contentType);
@@ -3668,6 +3769,55 @@ async function handleRequestCore(request, env, payload, ctx) {
       headers: toRedactedHeaderMap(upstreamResp.headers, redactHeaderSet),
       body_preview: previewBodyForDebug(responseType === "json" ? jsonBody ?? textBody : textBody),
     };
+  }
+
+  if (transformGlobalEnabled && inboundTransformConfig.enabled) {
+    const inboundHook = resolveCustomHook(inboundTransformConfig.custom_js_preprocessor);
+    if (inboundHook) {
+      let hookOutput;
+      try {
+        hookOutput = await inboundHook({
+          status: responseStatus,
+          headers: responseHeadersMap,
+          type: responseType,
+          content_type: contentType || null,
+          body: responseType === "json" ? jsonBody : textBody,
+        });
+      } catch (e) {
+        throw new HttpError(422, "TRANSFORM_ERROR", "Inbound custom_js_preprocessor failed", {
+          cause: String(e?.message || e),
+        });
+      }
+      if (!isPlainObject(hookOutput)) {
+        throw new HttpError(422, "TRANSFORM_ERROR", "Inbound custom_js_preprocessor must return an object", {
+          source: "custom_js_preprocessor",
+        });
+      }
+      if (hookOutput.status !== undefined) {
+        const nextStatus = Number(hookOutput.status);
+        if (Number.isFinite(nextStatus)) responseStatus = nextStatus;
+      }
+      if (hookOutput.headers && isPlainObject(hookOutput.headers)) {
+        responseHeadersMap = normalizeHeaderMap(hookOutput.headers);
+      }
+      if (hookOutput.content_type !== undefined) {
+        contentType = hookOutput.content_type === null ? null : String(hookOutput.content_type || "").trim() || null;
+      }
+      if (hookOutput.type && VALID_TRANSFORM_TYPES.has(String(hookOutput.type).toLowerCase())) {
+        responseType = String(hookOutput.type).toLowerCase();
+      }
+      if (hookOutput.body !== undefined) {
+        if (responseType === "json") {
+          if (typeof hookOutput.body === "string") {
+            jsonBody = parseJsonOrNull(hookOutput.body);
+          } else {
+            jsonBody = hookOutput.body;
+          }
+        } else {
+          textBody = typeof hookOutput.body === "string" ? hookOutput.body : JSON.stringify(hookOutput.body);
+        }
+      }
+    }
   }
 
   async function emitDebugTrace(transformInfo, finalHttpStatus, finalBody) {
@@ -3690,7 +3840,7 @@ async function handleRequestCore(request, env, payload, ctx) {
       timestamp: fmtTs(),
       text: traceText,
     };
-    const sink = await pushDebugTraceToLoggingUrl(traceText, debugTrace, config);
+    const sink = await pushDebugTraceToLoggingUrl(traceText, debugTrace, config, env);
     const loggingUrlStatus = !sink.attempted
       ? "off"
       : sink.ok
@@ -3705,7 +3855,7 @@ async function handleRequestCore(request, env, payload, ctx) {
   }
 
   const metaBase = {
-    status: upstreamResp.status,
+    status: responseStatus,
     upstream_ms: upstreamMs,
     upstream_headers: toSafeUpstreamHeaders(upstreamResp.headers),
     content_type: contentType || null,
@@ -3745,7 +3895,7 @@ async function handleRequestCore(request, env, payload, ctx) {
   }
 
   const ruleCtx = {
-    status: upstreamResp.status,
+    status: responseStatus,
     type: responseType,
     headers: responseHeadersMap,
   };
@@ -3800,7 +3950,7 @@ async function handleRequestCore(request, env, payload, ctx) {
     );
   } else {
     throw new HttpError(422, "TRANSFORM_RULE_NOT_MATCHED", "No transform rule matched and fallback is set to error", {
-      status: upstreamResp.status,
+      status: responseStatus,
       type: responseType,
       trace,
     });
@@ -3823,7 +3973,7 @@ async function handleRequestCore(request, env, payload, ctx) {
     output = await evalJsonataWithTimeout(
       expr,
       {
-        status: upstreamResp.status,
+        status: responseStatus,
         headers: responseHeadersMap,
         type: responseType,
         content_type: contentType || null,

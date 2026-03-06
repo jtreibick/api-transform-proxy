@@ -9,7 +9,7 @@ jwt:
     scheme: Bearer
     issuer: null
     audience: null
-    jwks_url: null
+    http_request: null
     clock_skew_seconds: 0
   outbound:
     enabled: false
@@ -44,9 +44,7 @@ targetCredentialRotation:
 debug:
   max_debug_session_seconds: 3600
   loggingEndpoint:
-    url: null
-    auth_header: null
-    auth_value: null
+    http_request: null
 transform:
   enabled: true
   defaultExpr: ""
