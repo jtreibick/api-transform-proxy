@@ -215,7 +215,8 @@ Wrangler-native KV provisioning:
   - Uses `BUILD_VERSION` env var, defaults to `dev` if unset.
 - `GET /_apiproxy/admin`
   - Browser admin console for all admin endpoints.
-  - Prompts for `X-Admin-Key`, exchanges it for short-lived access token, then provides UI controls for status, config, debug/logging, enrichments, and key rotation.
+  - Prompts for `X-Admin-Key`, exchanges it for short-lived access token, then provides UI controls for Status, Enrichments, Logging, Outbound Auth, Inbound Auth, API Sandbox, and Config.
+  - Logging Endpoint URL + Logging Auth Header are read from YAML config (`debug.loggingEndpoint`) and show blank when not set.
 - `POST /_apiproxy/admin/access-token`
   - Requires header `X-Admin-Key`.
   - Response: `{ "ok": true, "data": { "access_token": "...", "expires_at_ms": 123, "ttl_seconds": 3600 } }`

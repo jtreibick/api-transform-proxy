@@ -3,6 +3,63 @@
          let currentKey = '';
          let pendingDeleteHeaderName = '';
          let configValidateTimer = null;
+         let sandboxTemplateKey = '';
+         const SANDBOX_TEMPLATES = {
+           status_page: { label: 'GET /_apiproxy', method: 'GET', path: '/_apiproxy', auth_mode: 'none', headers: {}, body: null },
+           status_root: { label: 'GET /', method: 'GET', path: '/', auth_mode: 'none', headers: {}, body: null },
+           request_passthrough: {
+             label: 'POST /_apiproxy/request',
+             method: 'POST',
+             path: '/_apiproxy/request',
+             auth_mode: 'proxy_key',
+             headers: { 'Content-Type': 'application/json', 'X-Proxy-Host': 'https://httpbin.org' },
+             body: { upstream: { method: 'GET', url: '/json' } },
+           },
+           rotate_proxy: { label: 'POST /_apiproxy/keys/proxy/rotate', method: 'POST', path: '/_apiproxy/keys/proxy/rotate', auth_mode: 'proxy_key', headers: {}, body: null },
+           rotate_issuer: { label: 'POST /_apiproxy/keys/issuer/rotate', method: 'POST', path: '/_apiproxy/keys/issuer/rotate', auth_mode: 'issuer_key', headers: {}, body: null },
+           rotate_admin_public: { label: 'POST /_apiproxy/keys/admin/rotate', method: 'POST', path: '/_apiproxy/keys/admin/rotate', auth_mode: 'admin_key', headers: {}, body: null },
+           admin_version: { label: 'GET /_apiproxy/admin/version', method: 'GET', path: '/_apiproxy/admin/version', auth_mode: 'admin_token', headers: {}, body: null },
+           admin_keys_get: { label: 'GET /_apiproxy/admin/keys', method: 'GET', path: '/_apiproxy/admin/keys', auth_mode: 'admin_token', headers: {}, body: null },
+           admin_rotate_proxy: { label: 'POST /_apiproxy/admin/keys/proxy/rotate', method: 'POST', path: '/_apiproxy/admin/keys/proxy/rotate', auth_mode: 'admin_token', headers: {}, body: null },
+           admin_rotate_target_auth: { label: 'POST /_apiproxy/admin/keys/issuer/rotate', method: 'POST', path: '/_apiproxy/admin/keys/issuer/rotate', auth_mode: 'admin_token', headers: {}, body: null },
+           admin_rotate_admin: { label: 'POST /_apiproxy/admin/keys/admin/rotate', method: 'POST', path: '/_apiproxy/admin/keys/admin/rotate', auth_mode: 'admin_token', headers: {}, body: null },
+           admin_config_get: { label: 'GET /_apiproxy/admin/config', method: 'GET', path: '/_apiproxy/admin/config', auth_mode: 'admin_token', headers: {}, body: null },
+           admin_config_put: {
+             label: 'PUT /_apiproxy/admin/config',
+             method: 'PUT',
+             path: '/_apiproxy/admin/config',
+             auth_mode: 'admin_token',
+             headers: { 'Content-Type': 'text/yaml' },
+             body: 'targetHost: null\\ntransform:\\n  enabled: true\\n  defaultExpr: \"\"\\n  fallback: passthrough\\n  rules: []\\nheader_forwarding:\\n  mode: blacklist\\n  names:\\n    - connection\\n    - host\\n    - content-length\\n    - x-proxy-key\\n    - x-admin-key\\n    - x-issuer-key\\n    - x-proxy-host',
+           },
+           admin_config_validate: {
+             label: 'POST /_apiproxy/admin/config/validate',
+             method: 'POST',
+             path: '/_apiproxy/admin/config/validate',
+             auth_mode: 'admin_token',
+             headers: { 'Content-Type': 'text/yaml' },
+             body: 'targetHost: null\\ntransform:\\n  enabled: true\\n  defaultExpr: \"\"\\n  fallback: passthrough\\n  rules: []',
+            },
+           admin_config_test_rule: {
+             label: 'POST /_apiproxy/admin/config/test-rule',
+             method: 'POST',
+             path: '/_apiproxy/admin/config/test-rule',
+             auth_mode: 'admin_token',
+             headers: { 'Content-Type': 'application/json' },
+             body: { sample: { status: 500, headers: { 'content-type': 'application/json' }, type: 'json', body: { error: 'bad' } } },
+           },
+           admin_debug_get: { label: 'GET /_apiproxy/admin/debug', method: 'GET', path: '/_apiproxy/admin/debug', auth_mode: 'admin_token', headers: {}, body: null },
+           admin_debug_enable: { label: 'PUT /_apiproxy/admin/debug', method: 'PUT', path: '/_apiproxy/admin/debug', auth_mode: 'admin_token', headers: { 'Content-Type': 'application/json' }, body: { enabled: true, ttl_seconds: 3600 } },
+           admin_debug_disable: { label: 'DELETE /_apiproxy/admin/debug', method: 'DELETE', path: '/_apiproxy/admin/debug', auth_mode: 'admin_token', headers: {}, body: null },
+           admin_debug_last: { label: 'GET /_apiproxy/admin/debug/last', method: 'GET', path: '/_apiproxy/admin/debug/last', auth_mode: 'admin_token', headers: {}, body: null },
+           admin_debug_secret_put: { label: 'PUT /_apiproxy/admin/debug/loggingSecret', method: 'PUT', path: '/_apiproxy/admin/debug/loggingSecret', auth_mode: 'admin_token', headers: { 'Content-Type': 'application/json' }, body: { value: 'example' } },
+           admin_debug_secret_get: { label: 'GET /_apiproxy/admin/debug/loggingSecret', method: 'GET', path: '/_apiproxy/admin/debug/loggingSecret', auth_mode: 'admin_token', headers: {}, body: null },
+           admin_debug_secret_delete: { label: 'DELETE /_apiproxy/admin/debug/loggingSecret', method: 'DELETE', path: '/_apiproxy/admin/debug/loggingSecret', auth_mode: 'admin_token', headers: {}, body: null },
+           admin_headers_get: { label: 'GET /_apiproxy/admin/headers', method: 'GET', path: '/_apiproxy/admin/headers', auth_mode: 'admin_token', headers: {}, body: null },
+           admin_headers_put: { label: 'PUT /_apiproxy/admin/headers/authorization', method: 'PUT', path: '/_apiproxy/admin/headers/authorization', auth_mode: 'admin_token', headers: { 'Content-Type': 'application/json' }, body: { value: 'Bearer token' } },
+           admin_headers_delete: { label: 'DELETE /_apiproxy/admin/headers/authorization', method: 'DELETE', path: '/_apiproxy/admin/headers/authorization', auth_mode: 'admin_token', headers: {}, body: null },
+           admin_outbound_get: { label: 'GET /_apiproxy/admin/key-rotation-config', method: 'GET', path: '/_apiproxy/admin/key-rotation-config', auth_mode: 'admin_token', headers: {}, body: null },
+         };
 
          function el(id) { return document.getElementById(id); }
          function setOutput(id, data) {
@@ -43,6 +100,17 @@
            btn.disabled = !enabled;
            btn.style.opacity = enabled ? '1' : '0.5';
            btn.style.cursor = enabled ? 'pointer' : 'not-allowed';
+         }
+         function openConfigTab() {
+           document.querySelector('.tab-btn[data-tab="config"]')?.click();
+         }
+         function setOutboundMode(mode) {
+           const m = String(mode || '').trim();
+           const staticNode = el('outbound-static-fields');
+           const autoNode = el('outbound-auto-fields');
+           const isStatic = m === 'static_header';
+           if (staticNode) staticNode.style.display = isStatic ? 'block' : 'none';
+           if (autoNode) autoNode.style.display = isStatic ? 'none' : 'block';
          }
          function extractApiErrorText(payload, fallback) {
            if (payload && typeof payload === 'object' && payload.error && typeof payload.error === 'object') {
@@ -145,9 +213,13 @@
                debugLoadTrace();
                loadLoggingStatus();
              }
-             if (name === 'key-rotation') keyRotationLoad();
+             if (name === 'outbound-auth') keyRotationLoad();
+             if (name === 'inbound-auth') {
+               keyRotationLoad();
+               keysRefresh();
+             }
              if (name === 'headers') headersList();
-             if (name === 'keys') keysRefresh();
+             if (name === 'sandbox') sandboxInit();
            }
            btns.forEach((btn) => {
              btn.style.padding = '8px 10px';
@@ -240,8 +312,8 @@
                apiCall(ADMIN_ROOT + '/debug/loggingSecret', 'GET'),
                apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true),
              ]);
-             let endpointUrl = '(not set)';
-             let endpointAuthHeader = '(not set)';
+            let endpointUrl = '';
+            let endpointAuthHeader = '';
              try {
                const res = await fetch(ADMIN_ROOT + '/config/validate', {
                  method: 'POST',
@@ -253,8 +325,8 @@
                try { parsed = JSON.parse(txt); } catch {}
                if (res.ok && parsed?.data?.config?.debug?.loggingEndpoint) {
                  const cfg = parsed.data.config.debug.loggingEndpoint;
-                 endpointUrl = cfg.url || '(not set)';
-                 endpointAuthHeader = cfg.auth_header || '(not set)';
+                endpointUrl = cfg.url || '';
+                endpointAuthHeader = cfg.auth_header || '';
                }
              } catch {}
              if (el('logging-config-url')) el('logging-config-url').value = endpointUrl;
@@ -371,8 +443,20 @@
          }
          async function keyRotationLoad() {
            try {
-             const payload = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'GET');
+             const [payload, headersPayload] = await Promise.all([
+               apiCall(ADMIN_ROOT + '/key-rotation-config', 'GET'),
+               apiCall(ADMIN_ROOT + '/headers', 'GET'),
+             ]);
              const d = payload?.data || {};
+             const names = Array.isArray(headersPayload?.enriched_headers) ? headersPayload.enriched_headers : [];
+             const inferredStaticKey = names.includes('authorization') ? 'authorization' : (names[0] || '');
+             const staticHeaderKey = String(d.static_header_key || inferredStaticKey || '');
+             const staticHeaderValue = String(d.static_header_value || '');
+             const outboundMode = staticHeaderKey ? 'static_header' : 'autorotation';
+             if (el('outbound-mode')) el('outbound-mode').value = outboundMode;
+             if (el('outbound-static-header-key')) el('outbound-static-header-key').value = staticHeaderKey;
+             if (el('outbound-static-header-value')) el('outbound-static-header-value').value = staticHeaderValue;
+             setOutboundMode(outboundMode);
              if (el('kr-enabled')) el('kr-enabled').checked = !!d.enabled;
              if (el('kr-strategy')) el('kr-strategy').value = d.strategy || 'json_ttl';
              if (el('kr-request-yaml')) el('kr-request-yaml').value = String(d.request_yaml || '');
@@ -385,13 +469,25 @@
              if (el('kr-proxy-expiry')) el('kr-proxy-expiry').value = d.proxy_expiry_seconds == null ? 'null' : String(d.proxy_expiry_seconds);
              if (el('kr-issuer-expiry')) el('kr-issuer-expiry').value = d.issuer_expiry_seconds == null ? 'null' : String(d.issuer_expiry_seconds);
              if (el('kr-admin-expiry')) el('kr-admin-expiry').value = d.admin_expiry_seconds == null ? 'null' : String(d.admin_expiry_seconds);
-             setOutput('kr-output', 'Key rotation config loaded.');
+             setOutput('kr-output', 'Outbound auth configuration loaded.');
            } catch (e) {
              setOutput('kr-output', String(e.message || e));
            }
          }
          async function keyRotationSave() {
            try {
+             const mode = (el('outbound-mode')?.value || 'autorotation');
+             const staticHeaderKey = (el('outbound-static-header-key')?.value || '').trim();
+             const staticHeaderValue = el('outbound-static-header-value')?.value || '';
+             if (mode === 'static_header') {
+               if (!staticHeaderKey || !staticHeaderValue) {
+                 throw new Error('Static header key and secret value are required.');
+               }
+               await apiCall(ADMIN_ROOT + '/headers/' + encodeURIComponent(staticHeaderKey), 'PUT', { value: staticHeaderValue });
+               setOutput('kr-output', 'Saved static outbound auth header: ' + staticHeaderKey);
+               await headersList();
+               return;
+             }
              const payload = {
                enabled: !!el('kr-enabled')?.checked,
                strategy: (el('kr-strategy')?.value || 'json_ttl'),
@@ -402,14 +498,124 @@
                expires_at_path: el('kr-expires-at-path')?.value || null,
                refresh_skew_seconds: Number(el('kr-refresh-skew')?.value || 0),
                retry_once_on_401: !!el('kr-retry-on-401')?.checked,
-               proxy_expiry_seconds: normalizeNullableIntegerInput(el('kr-proxy-expiry')?.value),
-               issuer_expiry_seconds: normalizeNullableIntegerInput(el('kr-issuer-expiry')?.value),
-               admin_expiry_seconds: normalizeNullableIntegerInput(el('kr-admin-expiry')?.value),
              };
              const out = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'PUT', payload);
              setOutput('kr-output', out);
            } catch (e) {
              setOutput('kr-output', String(e.message || e));
+           }
+         }
+         async function inboundAuthSave() {
+           try {
+             const current = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'GET');
+             const d = current?.data || {};
+             const payload = {
+               enabled: !!d.enabled,
+               strategy: d.strategy || 'json_ttl',
+               request_yaml: d.request_yaml || '',
+               key_path: d.key_path || '',
+               ttl_path: d.ttl_path ?? null,
+               ttl_unit: d.ttl_unit || 'seconds',
+               expires_at_path: d.expires_at_path ?? null,
+               refresh_skew_seconds: Number(d.refresh_skew_seconds || 0),
+               retry_once_on_401: !!d.retry_once_on_401,
+               proxy_expiry_seconds: normalizeNullableIntegerInput(el('kr-proxy-expiry')?.value),
+               issuer_expiry_seconds: normalizeNullableIntegerInput(el('kr-issuer-expiry')?.value),
+               admin_expiry_seconds: normalizeNullableIntegerInput(el('kr-admin-expiry')?.value),
+               static_header_key: d.static_header_key ?? null,
+               static_header_value: d.static_header_value ?? null,
+             };
+             const out = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'PUT', payload);
+             setOutput('keys-output', out);
+             await keysRefresh();
+           } catch (e) {
+             setOutput('keys-output', String(e.message || e));
+           }
+         }
+         function sandboxRenderEndpointList() {
+           const node = el('sandbox-endpoints');
+           if (!node) return;
+           const rows = Object.entries(SANDBOX_TEMPLATES).map(([key, t]) =>
+             '<button type="button" class="sandbox-endpoint-btn" data-key="' + key + '"'
+             + ' style="display:block;width:100%;text-align:left;padding:8px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;cursor:pointer;margin-bottom:6px;">'
+             + t.label + '</button>'
+           );
+           node.innerHTML = rows.join('');
+         }
+         function sandboxApplyTemplate(key) {
+           const tpl = SANDBOX_TEMPLATES[key];
+           if (!tpl) return;
+           sandboxTemplateKey = key;
+           if (el('sandbox-auth-mode')) el('sandbox-auth-mode').value = tpl.auth_mode || 'none';
+           if (el('sandbox-extra-headers')) el('sandbox-extra-headers').value = JSON.stringify(tpl.headers || {}, null, 2);
+           if (el('sandbox-body')) {
+             if (tpl.body == null) {
+               el('sandbox-body').value = '';
+             } else if (typeof tpl.body === 'string') {
+               el('sandbox-body').value = tpl.body;
+             } else {
+               el('sandbox-body').value = JSON.stringify(tpl.body, null, 2);
+             }
+           }
+           setOutput('sandbox-request', 'Template selected: ' + tpl.label);
+         }
+         function sandboxBuildAuthHeader(mode, value) {
+           const v = String(value || '');
+           if (mode === 'admin_token') return currentKey ? { Authorization: 'Bearer ' + currentKey } : {};
+           if (mode === 'admin_key') return v ? { 'X-Admin-Key': v } : {};
+           if (mode === 'proxy_key') return v ? { 'X-Proxy-Key': v } : {};
+           if (mode === 'issuer_key') return v ? { 'X-Issuer-Key': v } : {};
+           return {};
+         }
+         async function sandboxSend() {
+           try {
+             const tpl = SANDBOX_TEMPLATES[sandboxTemplateKey] || SANDBOX_TEMPLATES.request_passthrough;
+             const authMode = el('sandbox-auth-mode')?.value || 'none';
+             const authValue = el('sandbox-auth-value')?.value || '';
+             let extraHeaders = {};
+             try {
+               extraHeaders = JSON.parse(el('sandbox-extra-headers')?.value || '{}');
+             } catch {
+               throw new Error('Extra headers must be valid JSON object.');
+             }
+             if (!extraHeaders || typeof extraHeaders !== 'object' || Array.isArray(extraHeaders)) {
+               throw new Error('Extra headers must be a JSON object.');
+             }
+             const templateHeaders = (tpl.headers && typeof tpl.headers === 'object' && !Array.isArray(tpl.headers)) ? tpl.headers : {};
+             const headers = { ...templateHeaders, ...extraHeaders, ...sandboxBuildAuthHeader(authMode, authValue) };
+             let bodyText = el('sandbox-body')?.value ?? '';
+             const formed = {
+               method: tpl.method,
+               path: tpl.path,
+               headers,
+               body: bodyText || null,
+             };
+             setOutput('sandbox-request', formed);
+             const init = {
+               method: tpl.method,
+               headers: { ...headers },
+             };
+             if (tpl.method !== 'GET' && tpl.method !== 'HEAD') {
+               init.body = bodyText || '';
+             }
+             const res = await fetch(tpl.path, init);
+             const text = await res.text();
+             let parsed = null;
+             try { parsed = JSON.parse(text); } catch {}
+             setOutput('sandbox-response', {
+               status: res.status,
+               headers: Object.fromEntries(res.headers.entries()),
+               body: parsed ?? text,
+             });
+           } catch (e) {
+             setOutput('sandbox-response', String(e.message || e));
+           }
+         }
+         function sandboxInit() {
+           if (!el('sandbox-endpoints')) return;
+           if (!sandboxTemplateKey) {
+             sandboxRenderEndpointList();
+             sandboxApplyTemplate('request_passthrough');
            }
          }
          async function headersList() {
@@ -591,7 +797,15 @@
            });
            el('logging-open-config-link')?.addEventListener('click', (evt) => {
              evt.preventDefault();
-             document.querySelector('.tab-btn[data-tab="config"]')?.click();
+             openConfigTab();
+           });
+           el('logging-open-config-link-label')?.addEventListener('click', (evt) => {
+             evt.preventDefault();
+             openConfigTab();
+           });
+           el('logging-open-config-link-header')?.addEventListener('click', (evt) => {
+             evt.preventDefault();
+             openConfigTab();
            });
            el('debug-enable-btn')?.addEventListener('click', debugEnable);
            el('debug-disable-btn')?.addEventListener('click', debugDisable);
@@ -607,7 +821,11 @@
            });
            el('config-save-btn')?.addEventListener('click', configSave);
            el('kr-save-btn')?.addEventListener('click', keyRotationSave);
+           el('kr-save-btn-bottom')?.addEventListener('click', keyRotationSave);
            el('kr-reload-btn')?.addEventListener('click', keyRotationLoad);
+           el('outbound-mode')?.addEventListener('change', () => {
+             setOutboundMode(el('outbound-mode')?.value || 'autorotation');
+           });
            el('config-yaml')?.addEventListener('input', () => {
              setConfigSaveEnabled(false);
              if (configValidateTimer) clearTimeout(configValidateTimer);
@@ -631,9 +849,17 @@
            });
            el('delete-header-confirm-btn')?.addEventListener('click', headersDeleteConfirmed);
            el('keys-refresh-btn')?.addEventListener('click', keysRefresh);
+           el('inbound-save-btn')?.addEventListener('click', inboundAuthSave);
            el('rotate-proxy-btn')?.addEventListener('click', rotateProxy);
            el('rotate-issuer-btn')?.addEventListener('click', rotateIssuer);
            el('rotate-admin-btn')?.addEventListener('click', rotateAdmin);
+           el('sandbox-endpoints')?.addEventListener('click', (evt) => {
+             const target = evt.target?.closest ? evt.target.closest('.sandbox-endpoint-btn') : null;
+             if (!target) return;
+             const key = target.getAttribute('data-key') || '';
+             sandboxApplyTemplate(key);
+           });
+           el('sandbox-send-btn')?.addEventListener('click', sandboxSend);
            try {
              const token = sessionStorage.getItem(ADMIN_ACCESS_TOKEN_STORAGE) || '';
              if (token) {
@@ -645,6 +871,7 @@
                keyRotationLoad();
                headersList();
                keysRefresh();
+               sandboxInit();
              }
            } catch {}
          }
