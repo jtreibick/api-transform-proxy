@@ -568,7 +568,17 @@
                return { key, tpl };
              }
            }
-           return null;
+          return null;
+         }
+         function sandboxMethodsForSuffix(suffix) {
+           const s = String(suffix || '');
+           const methods = Array.from(new Set(
+             Object.values(SANDBOX_TEMPLATES)
+               .filter((tpl) => sandboxPathToSuffix(String(tpl.path || '')) === s)
+               .map((tpl) => String(tpl.method || '').toUpperCase())
+               .filter(Boolean)
+           ));
+           return methods.sort();
          }
          function sandboxRedactHeader(name, value) {
            const n = String(name || '').toLowerCase();
@@ -597,22 +607,21 @@
          function sandboxRenderSelectors() {
            const verbNode = el('sandbox-verb');
            const pathNode = el('sandbox-path');
+           const baseNode = el('sandbox-base-url');
            if (!verbNode || !pathNode) return;
-           const verbs = Array.from(new Set(
-             Object.values(SANDBOX_TEMPLATES)
-               .map((t) => String(t.method || '').toUpperCase())
-               .filter(Boolean)
-           )).sort();
+           if (baseNode) baseNode.textContent = window.location.origin || '';
            const paths = Array.from(new Set(
              Object.values(SANDBOX_TEMPLATES)
                .map((t) => sandboxPathToSuffix(String(t.path || '')))
                .filter((v) => v !== null)
            )).sort((a, b) => a.localeCompare(b));
-           verbNode.innerHTML = verbs.map((v) => '<option value="' + v + '">' + v + '</option>').join('');
            pathNode.innerHTML = paths.map((p) => {
              const label = p || '(root)';
              return '<option value="' + p + '">' + label + '</option>';
            }).join('');
+           const initialSuffix = pathNode.value || paths[0] || '';
+           const methods = sandboxMethodsForSuffix(initialSuffix);
+           verbNode.innerHTML = methods.map((v) => '<option value="' + v + '">' + v + '</option>').join('');
          }
          function sandboxApplyTemplate(key) {
            const tpl = SANDBOX_TEMPLATES[key];
@@ -621,12 +630,15 @@
            const suffix = sandboxPathToSuffix(String(tpl.path || ''));
            if (suffix !== null) {
              sandboxSyncingControls = true;
-             if (el('sandbox-verb')) el('sandbox-verb').value = String(tpl.method || 'GET').toUpperCase();
              if (el('sandbox-path')) el('sandbox-path').value = suffix;
+             const methods = sandboxMethodsForSuffix(suffix);
+             if (el('sandbox-verb')) {
+               el('sandbox-verb').innerHTML = methods.map((m) => '<option value="' + m + '">' + m + '</option>').join('');
+               el('sandbox-verb').value = String(tpl.method || 'GET').toUpperCase();
+             }
              sandboxSyncingControls = false;
              sandboxSyncUrlFromSelection();
            }
-           if (el('sandbox-auth-mode')) el('sandbox-auth-mode').value = tpl.auth_mode || 'none';
            if (el('sandbox-extra-headers')) el('sandbox-extra-headers').value = JSON.stringify(tpl.headers || {}, null, 2);
            if (el('sandbox-body')) {
              if (tpl.body == null) {
@@ -640,8 +652,16 @@
            setOutput('sandbox-request', 'Template selected: ' + tpl.label);
          }
          function sandboxApplyTemplateForSelection() {
-           const method = el('sandbox-verb')?.value || 'GET';
            const suffix = el('sandbox-path')?.value || '';
+           const requestedMethod = el('sandbox-verb')?.value || '';
+           const methods = sandboxMethodsForSuffix(suffix);
+           if (el('sandbox-verb')) {
+             el('sandbox-verb').innerHTML = methods.map((m) => '<option value="' + m + '">' + m + '</option>').join('');
+             if (methods.includes(requestedMethod)) {
+               el('sandbox-verb').value = requestedMethod;
+             }
+           }
+           const method = el('sandbox-verb')?.value || methods[0] || 'GET';
            const match = sandboxFindTemplate(method, suffix);
            if (match) {
              sandboxApplyTemplate(match.key);
@@ -650,36 +670,32 @@
            sandboxTemplateKey = '';
            sandboxSyncUrlFromSelection();
          }
-         function sandboxBuildAuthHeader(mode, value) {
-           const v = String(value || '');
-           if (mode === 'admin_token') return currentKey ? { Authorization: 'Bearer ' + currentKey } : {};
-           if (mode === 'admin_key') return v ? { 'X-Admin-Key': v } : {};
-           if (mode === 'proxy_key') return v ? { 'X-Proxy-Key': v } : {};
-           if (mode === 'issuer_key') return v ? { 'X-Issuer-Key': v } : {};
-           return {};
+         function sandboxBuildAuthHeader(valueOverride) {
+           const override = String(valueOverride || '').trim();
+           if (override) return { Authorization: 'Bearer ' + override };
+           return currentKey ? { Authorization: 'Bearer ' + currentKey } : {};
          }
          async function sandboxSend() {
            try {
-             const method = String(el('sandbox-verb')?.value || 'GET').toUpperCase();
-             const suffix = String(el('sandbox-path')?.value || '');
-             const tplMatch = sandboxFindTemplate(method, suffix);
-             const tpl = tplMatch ? tplMatch.tpl : null;
-             const authMode = el('sandbox-auth-mode')?.value || 'none';
-             const authValue = el('sandbox-auth-value')?.value || '';
-             const url = String(el('sandbox-url')?.value || sandboxBuildUrlFromSelection()).trim();
-             if (!url) throw new Error('Request URL is required.');
+              const method = String(el('sandbox-verb')?.value || 'GET').toUpperCase();
+              const suffix = String(el('sandbox-path')?.value || '');
+              const tplMatch = sandboxFindTemplate(method, suffix);
+              const tpl = tplMatch ? tplMatch.tpl : null;
+              const authValue = el('sandbox-auth-value')?.value || '';
+              const url = String(el('sandbox-url')?.value || sandboxBuildUrlFromSelection()).trim();
+              if (!url) throw new Error('Request URL is required.');
              let extraHeaders = {};
              try {
                extraHeaders = JSON.parse(el('sandbox-extra-headers')?.value || '{}');
              } catch {
                throw new Error('Extra headers must be valid JSON object.');
              }
-             if (!extraHeaders || typeof extraHeaders !== 'object' || Array.isArray(extraHeaders)) {
-               throw new Error('Extra headers must be a JSON object.');
-             }
-             const templateHeaders = (tpl && tpl.headers && typeof tpl.headers === 'object' && !Array.isArray(tpl.headers)) ? tpl.headers : {};
-             const headers = { ...templateHeaders, ...extraHeaders, ...sandboxBuildAuthHeader(authMode, authValue) };
-             let bodyText = el('sandbox-body')?.value ?? '';
+              if (!extraHeaders || typeof extraHeaders !== 'object' || Array.isArray(extraHeaders)) {
+                throw new Error('Extra headers must be a JSON object.');
+              }
+              const templateHeaders = (tpl && tpl.headers && typeof tpl.headers === 'object' && !Array.isArray(tpl.headers)) ? tpl.headers : {};
+              const headers = { ...templateHeaders, ...extraHeaders, ...sandboxBuildAuthHeader(authValue) };
+              let bodyText = el('sandbox-body')?.value ?? '';
              const curlText = sandboxBuildCurl(method, url, headers, bodyText);
              setOutput('sandbox-request', curlText);
              const init = {

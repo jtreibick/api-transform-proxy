@@ -182,26 +182,23 @@
          <div id="tab-sandbox" class="tab-panel" style="display:none;">
            <p><b>API Sandbox</b></p>
            <div style="flex:1;min-width:340px;">
+             <label style="display:block;margin:4px 0 4px;">Built-in Auth Header</label>
+             <div style="padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;max-width:420px;">
+               Authorization: Bearer (current admin token)
+             </div>
+             <label for="sandbox-auth-value" style="display:block;margin:8px 0 4px;">Auth Header Value (when required)</label>
+             <input id="sandbox-auth-value" type="password" placeholder="optional bearer token override"
+               style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
              <label style="display:block;margin:4px 0 6px;">Endpoint</label>
              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-               <select id="sandbox-verb" style="min-width:120px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;"></select>
+               <span id="sandbox-base-url" style="font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"></span>
                <code>/_apiproxy/</code>
                <select id="sandbox-path" style="min-width:260px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;"></select>
+               <select id="sandbox-verb" style="min-width:120px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;"></select>
              </div>
              <label for="sandbox-url" style="display:block;margin:8px 0 4px;">Full Request URL (editable)</label>
              <input id="sandbox-url" type="text"
                style="width:100%;max-width:760px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
-             <label for="sandbox-auth-mode" style="display:block;margin:10px 0 4px;">Built-in Auth Header</label>
-             <select id="sandbox-auth-mode" style="width:100%;max-width:360px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;">
-               <option value="none">none</option>
-               <option value="admin_token">Authorization: Bearer (current admin token)</option>
-               <option value="admin_key">X-Admin-Key</option>
-               <option value="proxy_key">X-Proxy-Key</option>
-               <option value="issuer_key">X-Issuer-Key</option>
-             </select>
-             <label for="sandbox-auth-value" style="display:block;margin:8px 0 4px;">Auth Header Value (when required)</label>
-             <input id="sandbox-auth-value" type="password" placeholder="header value"
-               style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
              <label for="sandbox-extra-headers" style="display:block;margin:8px 0 4px;">Headers (JSON object)</label>
              <textarea id="sandbox-extra-headers" rows="4"
                style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">{}</textarea>
