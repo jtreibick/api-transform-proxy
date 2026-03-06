@@ -229,6 +229,67 @@
            <input id="jwt-endpoint-url" type="text" readonly
              style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;" />
            <div id="jwt-fields" style="display:none;">
+             <p style="margin:10px 0 6px;"><b>Inbound JWT Verification (They verify with me)</b></p>
+             <label style="display:flex;gap:8px;align-items:center;margin:8px 0 6px;">
+               <input id="jwt-inbound-enabled" type="checkbox" />
+               <span>Enable inbound verification</span>
+             </label>
+             <div id="jwt-inbound-fields" style="display:none;">
+               <label for="jwt-inbound-mode" style="display:block;margin:8px 0 4px;">Verification mode</label>
+               <select id="jwt-inbound-mode" style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;">
+                 <option value="shared_secret">shared_secret</option>
+                 <option value="jwks">jwks</option>
+               </select>
+               <div id="jwt-inbound-shared-note" style="font-size:12px;color:#64748b;margin-top:4px;">Shared secret uses the issuer key (HS256).</div>
+               <label for="jwt-inbound-header" style="display:block;margin:8px 0 4px;">JWT header name</label>
+               <input id="jwt-inbound-header" type="text" placeholder="Authorization"
+                 style="width:100%;max-width:420px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+               <label for="jwt-inbound-scheme" style="display:block;margin:8px 0 4px;">JWT scheme (optional)</label>
+               <input id="jwt-inbound-scheme" type="text" placeholder="Bearer"
+                 style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+               <label for="jwt-inbound-issuer" style="display:block;margin:8px 0 4px;">Issuer (optional)</label>
+               <input id="jwt-inbound-issuer" type="text" placeholder="iss"
+                 style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+               <label for="jwt-inbound-audience" style="display:block;margin:8px 0 4px;">Audience (optional)</label>
+               <input id="jwt-inbound-audience" type="text" placeholder="aud"
+                 style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+               <div id="jwt-inbound-jwks-fields" style="display:none;">
+                 <label for="jwt-inbound-jwks-url" style="display:block;margin:8px 0 4px;">JWKS URL</label>
+                 <input id="jwt-inbound-jwks-url" type="text" placeholder="https://example.com/.well-known/jwks.json"
+                   style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+               </div>
+               <label for="jwt-inbound-skew" style="display:block;margin:8px 0 4px;">Clock skew seconds</label>
+               <input id="jwt-inbound-skew" type="text" placeholder="0"
+                 style="width:100%;max-width:160px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+             </div>
+             <hr style="margin:16px 0;border:none;border-top:1px solid #e2e8f0;" />
+             <p style="margin:10px 0 6px;"><b>Outbound JWT Issuance (I verify with them)</b></p>
+             <label style="display:flex;gap:8px;align-items:center;margin:8px 0 6px;">
+               <input id="jwt-outbound-enabled" type="checkbox" />
+               <span>Enable outbound issuance</span>
+             </label>
+             <div id="jwt-outbound-fields" style="display:none;">
+               <div style="font-size:12px;color:#64748b;margin-top:4px;">Outbound signing uses the issuer key (HS256).</div>
+               <label for="jwt-outbound-header" style="display:block;margin:8px 0 4px;">JWT header name</label>
+               <input id="jwt-outbound-header" type="text" placeholder="Authorization"
+                 style="width:100%;max-width:420px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+               <label for="jwt-outbound-scheme" style="display:block;margin:8px 0 4px;">JWT scheme (optional)</label>
+               <input id="jwt-outbound-scheme" type="text" placeholder="Bearer"
+                 style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+               <label for="jwt-outbound-issuer" style="display:block;margin:8px 0 4px;">Issuer (optional)</label>
+               <input id="jwt-outbound-issuer" type="text" placeholder="iss"
+                 style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+               <label for="jwt-outbound-audience" style="display:block;margin:8px 0 4px;">Audience (optional)</label>
+               <input id="jwt-outbound-audience" type="text" placeholder="aud"
+                 style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+               <label for="jwt-outbound-subject" style="display:block;margin:8px 0 4px;">Subject (optional)</label>
+               <input id="jwt-outbound-subject" type="text" placeholder="sub"
+                 style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+               <label for="jwt-outbound-ttl" style="display:block;margin:8px 0 4px;">Token TTL seconds</label>
+               <input id="jwt-outbound-ttl" type="text" placeholder="3600"
+                 style="width:100%;max-width:160px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
+             </div>
+             <hr style="margin:16px 0;border:none;border-top:1px solid #e2e8f0;" />
              <label for="kr-issuer-expiry" style="display:block;margin:10px 0 4px;">Issuer Auth Token Expiry Seconds</label>
              <input id="kr-issuer-expiry" type="text" placeholder="n/a"
                style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />

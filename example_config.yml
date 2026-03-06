@@ -2,6 +2,23 @@ targetHost: null
 proxyName: null
 jwt:
   enabled: false
+  inbound:
+    enabled: false
+    mode: shared_secret
+    header: Authorization
+    scheme: Bearer
+    issuer: null
+    audience: null
+    jwks_url: null
+    clock_skew_seconds: 0
+  outbound:
+    enabled: false
+    header: Authorization
+    scheme: Bearer
+    issuer: null
+    audience: null
+    subject: null
+    ttl_seconds: 3600
 apiKeyPolicy:
   proxyExpirySeconds: null
   issuerExpirySeconds: null

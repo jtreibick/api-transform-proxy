@@ -88,6 +88,25 @@ const CONFIG_SCHEMA_V1 = {
   proxyName: "string|null",
   jwt: {
     enabled: "boolean",
+    inbound: {
+      enabled: "boolean",
+      mode: "shared_secret|jwks",
+      header: "string",
+      scheme: "string|null",
+      issuer: "string|null",
+      audience: "string|null",
+      jwks_url: "string|null",
+      clock_skew_seconds: "integer>=0",
+    },
+    outbound: {
+      enabled: "boolean",
+      header: "string",
+      scheme: "string|null",
+      issuer: "string|null",
+      audience: "string|null",
+      subject: "string|null",
+      ttl_seconds: "integer>=1|null",
+    },
   },
   apiKeyPolicy: {
     proxyExpirySeconds: "integer|null",
@@ -184,6 +203,8 @@ const PROXY_HOST_HEADER_NAMES_LOWER = new Set(PROXY_HOST_HEADER_NAMES.map((n) =>
 const VALID_FALLBACK_VALUES = new Set(["passthrough", "error", "transform_default"]);
 const VALID_TRANSFORM_TYPES = new Set(["json", "text", "binary", "any"]);
 const VALID_HEADER_FORWARDING_MODES = new Set(["blacklist", "whitelist"]);
+const VALID_JWT_INBOUND_MODES = new Set(["shared_secret", "jwks"]);
+const JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
 const STATUS_CLASS_PATTERN = /^[1-5]xx$/i;
 const DEFAULT_HEADER_FORWARDING_NAMES = [
   ...HOP_BY_HOP_HEADERS,
@@ -203,6 +224,25 @@ const DEFAULT_CONFIG_V1 = {
   proxyName: null,
   jwt: {
     enabled: false,
+    inbound: {
+      enabled: false,
+      mode: "shared_secret",
+      header: "Authorization",
+      scheme: "Bearer",
+      issuer: null,
+      audience: null,
+      jwks_url: null,
+      clock_skew_seconds: 0,
+    },
+    outbound: {
+      enabled: false,
+      header: "Authorization",
+      scheme: "Bearer",
+      issuer: null,
+      audience: null,
+      subject: null,
+      ttl_seconds: 3600,
+    },
   },
   apiKeyPolicy: {
     proxyExpirySeconds: null,
@@ -543,6 +583,168 @@ function normalizeHeaderName(name) {
   return String(name || "").trim().toLowerCase();
 }
 
+function base64UrlEncodeBytes(bytes) {
+  let binary = "";
+  bytes.forEach((b) => {
+    binary += String.fromCharCode(b);
+  });
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlEncodeString(value) {
+  const enc = new TextEncoder();
+  return base64UrlEncodeBytes(enc.encode(value));
+}
+
+function base64UrlDecodeToBytes(value) {
+  const padded = String(value || "").replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function parseJwtToken(token) {
+  const parts = String(token || "").split(".");
+  if (parts.length !== 3) {
+    throw new HttpError(401, "JWT_INVALID", "JWT must have three segments");
+  }
+  const [headerB64, payloadB64, sigB64] = parts;
+  let header;
+  let payload;
+  try {
+    header = JSON.parse(new TextDecoder().decode(base64UrlDecodeToBytes(headerB64)));
+    payload = JSON.parse(new TextDecoder().decode(base64UrlDecodeToBytes(payloadB64)));
+  } catch (e) {
+    throw new HttpError(401, "JWT_INVALID", "JWT header or payload is not valid JSON");
+  }
+  return {
+    header,
+    payload,
+    signature: base64UrlDecodeToBytes(sigB64),
+    signingInput: `${headerB64}.${payloadB64}`,
+  };
+}
+
+function extractJwtFromHeaders(headers, config) {
+  const headerName = normalizeHeaderName(config?.header || "authorization");
+  if (!headerName) throw new HttpError(401, "JWT_INVALID", "JWT header name is invalid");
+  const raw = headers.get(headerName) || headers.get(headerName.toLowerCase()) || "";
+  if (!raw) throw new HttpError(401, "JWT_MISSING", "JWT header is missing");
+  const scheme = typeof config?.scheme === "string" ? config.scheme.trim() : "Bearer";
+  if (!scheme) return raw.trim();
+  const match = raw.match(new RegExp(`^${scheme}\\s+(.+)$`, "i"));
+  if (!match) throw new HttpError(401, "JWT_INVALID", `JWT header must use ${scheme} scheme`);
+  return match[1].trim();
+}
+
+function assertJwtClaims(payload, cfg) {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const skew = Number(cfg?.clock_skew_seconds || 0);
+  if (payload.exp !== undefined) {
+    const exp = Number(payload.exp);
+    if (!Number.isFinite(exp)) throw new HttpError(401, "JWT_INVALID", "JWT exp claim is invalid");
+    if (nowSec - skew >= exp) throw new HttpError(401, "JWT_EXPIRED", "JWT has expired");
+  }
+  if (payload.nbf !== undefined) {
+    const nbf = Number(payload.nbf);
+    if (!Number.isFinite(nbf)) throw new HttpError(401, "JWT_INVALID", "JWT nbf claim is invalid");
+    if (nowSec + skew < nbf) throw new HttpError(401, "JWT_NOT_ACTIVE", "JWT is not active yet");
+  }
+  if (payload.iss && cfg?.issuer && String(payload.iss) !== String(cfg.issuer)) {
+    throw new HttpError(401, "JWT_INVALID", "JWT issuer mismatch");
+  }
+  if (cfg?.audience) {
+    const aud = payload.aud;
+    const want = String(cfg.audience);
+    if (Array.isArray(aud)) {
+      if (!aud.map(String).includes(want)) throw new HttpError(401, "JWT_INVALID", "JWT audience mismatch");
+    } else if (aud !== undefined && String(aud) !== want) {
+      throw new HttpError(401, "JWT_INVALID", "JWT audience mismatch");
+    } else if (aud === undefined) {
+      throw new HttpError(401, "JWT_INVALID", "JWT audience missing");
+    }
+  }
+}
+
+let JWKS_CACHE = { url: "", fetchedAt: 0, keys: [] };
+
+async function fetchJwks(url) {
+  const now = Date.now();
+  if (JWKS_CACHE.url === url && now - JWKS_CACHE.fetchedAt < JWKS_CACHE_TTL_MS) {
+    return JWKS_CACHE.keys;
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  let res;
+  try {
+    res = await fetch(url, { signal: controller.signal });
+  } catch (e) {
+    throw new HttpError(502, "JWKS_FETCH_FAILED", "Failed to fetch JWKS");
+  } finally {
+    clearTimeout(timeout);
+  }
+  if (!res.ok) {
+    throw new HttpError(502, "JWKS_FETCH_FAILED", "Failed to fetch JWKS", { status: res.status });
+  }
+  const data = await res.json();
+  const keys = Array.isArray(data?.keys) ? data.keys : [];
+  JWKS_CACHE = { url, fetchedAt: now, keys };
+  return keys;
+}
+
+async function verifyJwtHs256(token, secret, cfg) {
+  const { header, payload, signature, signingInput } = parseJwtToken(token);
+  if (String(header.alg || "").toUpperCase() !== "HS256") {
+    throw new HttpError(401, "JWT_INVALID", "JWT alg must be HS256");
+  }
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+  const ok = await crypto.subtle.verify("HMAC", key, signature, enc.encode(signingInput));
+  if (!ok) throw new HttpError(401, "JWT_INVALID", "JWT signature invalid");
+  assertJwtClaims(payload, cfg);
+  return payload;
+}
+
+async function verifyJwtRs256(token, cfg) {
+  const { header, payload, signature, signingInput } = parseJwtToken(token);
+  if (String(header.alg || "").toUpperCase() !== "RS256") {
+    throw new HttpError(401, "JWT_INVALID", "JWT alg must be RS256");
+  }
+  const jwksUrl = cfg?.jwks_url;
+  if (!jwksUrl) throw new HttpError(401, "JWT_INVALID", "JWKS URL is required");
+  const keys = await fetchJwks(jwksUrl);
+  if (!keys.length) throw new HttpError(401, "JWT_INVALID", "JWKS contains no keys");
+  const kid = header.kid;
+  let jwk = null;
+  if (kid) {
+    jwk = keys.find((k) => k.kid === kid) || null;
+  } else if (keys.length === 1) {
+    jwk = keys[0];
+  }
+  if (!jwk) throw new HttpError(401, "JWT_INVALID", "No matching JWKS key found");
+  const key = await crypto.subtle.importKey("jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
+  const enc = new TextEncoder();
+  const ok = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, signature, enc.encode(signingInput));
+  if (!ok) throw new HttpError(401, "JWT_INVALID", "JWT signature invalid");
+  assertJwtClaims(payload, cfg);
+  return payload;
+}
+
+async function signJwtHs256(payload, secret) {
+  const header = { alg: "HS256", typ: "JWT" };
+  const headerB64 = base64UrlEncodeString(JSON.stringify(header));
+  const payloadB64 = base64UrlEncodeString(JSON.stringify(payload));
+  const signingInput = `${headerB64}.${payloadB64}`;
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(signingInput));
+  const sigB64 = base64UrlEncodeBytes(new Uint8Array(sig));
+  return `${signingInput}.${sigB64}`;
+}
+
 function assertValidHeaderName(nameRaw) {
   const decoded = decodeURIComponent(String(nameRaw || ""));
   const normalized = normalizeHeaderName(decoded);
@@ -779,11 +981,91 @@ function validateAndNormalizeConfigV1(configInput) {
     pushProblem(problems, "$.jwt", "must be an object when provided");
   }
   if (isNonArrayObject(jwtIn)) {
-    ensureNoUnknownKeys(jwtIn, new Set(["enabled"]), "$.jwt", problems);
+    ensureNoUnknownKeys(jwtIn, new Set(["enabled", "inbound", "outbound"]), "$.jwt", problems);
   }
   const jwtEnabled = isNonArrayObject(jwtIn) && jwtIn.enabled !== undefined ? jwtIn.enabled : false;
   if (typeof jwtEnabled !== "boolean") {
     pushProblem(problems, "$.jwt.enabled", "must be a boolean");
+  }
+  const jwtInboundIn = isNonArrayObject(jwtIn) ? jwtIn.inbound ?? {} : {};
+  if (!isNonArrayObject(jwtInboundIn)) {
+    pushProblem(problems, "$.jwt.inbound", "must be an object when provided");
+  }
+  if (isNonArrayObject(jwtInboundIn)) {
+    ensureNoUnknownKeys(
+      jwtInboundIn,
+      new Set(["enabled", "mode", "header", "scheme", "issuer", "audience", "jwks_url", "clock_skew_seconds"]),
+      "$.jwt.inbound",
+      problems
+    );
+  }
+  const jwtInboundEnabled = isNonArrayObject(jwtInboundIn) && jwtInboundIn.enabled !== undefined ? jwtInboundIn.enabled : false;
+  if (typeof jwtInboundEnabled !== "boolean") {
+    pushProblem(problems, "$.jwt.inbound.enabled", "must be a boolean");
+  }
+  const jwtInboundMode = isNonArrayObject(jwtInboundIn) && jwtInboundIn.mode !== undefined ? String(jwtInboundIn.mode) : "shared_secret";
+  if (!new Set(["shared_secret", "jwks"]).has(jwtInboundMode)) {
+    pushProblem(problems, "$.jwt.inbound.mode", "must be shared_secret or jwks");
+  }
+  const jwtInboundHeader = normalizeHeaderName(jwtInboundIn.header || "Authorization");
+  if (!jwtInboundHeader) {
+    pushProblem(problems, "$.jwt.inbound.header", "must be a non-empty header name");
+  }
+  const jwtInboundSchemeRaw = jwtInboundIn.scheme;
+  const jwtInboundScheme =
+    jwtInboundSchemeRaw === undefined || jwtInboundSchemeRaw === null ? "Bearer" : String(jwtInboundSchemeRaw || "").trim();
+  const jwtInboundIssuer = jwtInboundIn.issuer === undefined || jwtInboundIn.issuer === null ? null : String(jwtInboundIn.issuer || "").trim();
+  const jwtInboundAudience = jwtInboundIn.audience === undefined || jwtInboundIn.audience === null ? null : String(jwtInboundIn.audience || "").trim();
+  const jwtInboundJwksUrl = jwtInboundIn.jwks_url === undefined || jwtInboundIn.jwks_url === null ? null : String(jwtInboundIn.jwks_url || "").trim();
+  if (jwtInboundMode === "jwks" && jwtInboundEnabled && !jwtInboundJwksUrl) {
+    pushProblem(problems, "$.jwt.inbound.jwks_url", "must be provided when mode is jwks");
+  }
+  if (jwtInboundJwksUrl) {
+    try {
+      const u = new URL(jwtInboundJwksUrl);
+      if (u.protocol !== "https:") {
+        pushProblem(problems, "$.jwt.inbound.jwks_url", "must use https");
+      }
+    } catch {
+      pushProblem(problems, "$.jwt.inbound.jwks_url", "must be a valid URL");
+    }
+  }
+  const jwtInboundSkewRaw = jwtInboundIn.clock_skew_seconds;
+  const jwtInboundSkew = jwtInboundSkewRaw === undefined || jwtInboundSkewRaw === null ? 0 : Number(jwtInboundSkewRaw);
+  if (!Number.isInteger(jwtInboundSkew) || jwtInboundSkew < 0) {
+    pushProblem(problems, "$.jwt.inbound.clock_skew_seconds", "must be an integer >= 0");
+  }
+
+  const jwtOutboundIn = isNonArrayObject(jwtIn) ? jwtIn.outbound ?? {} : {};
+  if (!isNonArrayObject(jwtOutboundIn)) {
+    pushProblem(problems, "$.jwt.outbound", "must be an object when provided");
+  }
+  if (isNonArrayObject(jwtOutboundIn)) {
+    ensureNoUnknownKeys(
+      jwtOutboundIn,
+      new Set(["enabled", "header", "scheme", "issuer", "audience", "subject", "ttl_seconds"]),
+      "$.jwt.outbound",
+      problems
+    );
+  }
+  const jwtOutboundEnabled = isNonArrayObject(jwtOutboundIn) && jwtOutboundIn.enabled !== undefined ? jwtOutboundIn.enabled : false;
+  if (typeof jwtOutboundEnabled !== "boolean") {
+    pushProblem(problems, "$.jwt.outbound.enabled", "must be a boolean");
+  }
+  const jwtOutboundHeader = normalizeHeaderName(jwtOutboundIn.header || "Authorization");
+  if (!jwtOutboundHeader) {
+    pushProblem(problems, "$.jwt.outbound.header", "must be a non-empty header name");
+  }
+  const jwtOutboundSchemeRaw = jwtOutboundIn.scheme;
+  const jwtOutboundScheme =
+    jwtOutboundSchemeRaw === undefined || jwtOutboundSchemeRaw === null ? "Bearer" : String(jwtOutboundSchemeRaw || "").trim();
+  const jwtOutboundIssuer = jwtOutboundIn.issuer === undefined || jwtOutboundIn.issuer === null ? null : String(jwtOutboundIn.issuer || "").trim();
+  const jwtOutboundAudience = jwtOutboundIn.audience === undefined || jwtOutboundIn.audience === null ? null : String(jwtOutboundIn.audience || "").trim();
+  const jwtOutboundSubject = jwtOutboundIn.subject === undefined || jwtOutboundIn.subject === null ? null : String(jwtOutboundIn.subject || "").trim();
+  const jwtOutboundTtlRaw = jwtOutboundIn.ttl_seconds;
+  const jwtOutboundTtl = jwtOutboundTtlRaw === undefined || jwtOutboundTtlRaw === null ? 3600 : Number(jwtOutboundTtlRaw);
+  if (!Number.isInteger(jwtOutboundTtl) || jwtOutboundTtl < 1) {
+    pushProblem(problems, "$.jwt.outbound.ttl_seconds", "must be a positive integer or null");
   }
 
   const apiKeyPolicyIn = input.apiKeyPolicy ?? {};
@@ -1050,6 +1332,25 @@ function validateAndNormalizeConfigV1(configInput) {
     proxyName,
     jwt: {
       enabled: !!jwtEnabled,
+      inbound: {
+        enabled: !!jwtInboundEnabled,
+        mode: jwtInboundMode,
+        header: jwtInboundHeader || "Authorization",
+        scheme: jwtInboundScheme || null,
+        issuer: jwtInboundIssuer || null,
+        audience: jwtInboundAudience || null,
+        jwks_url: jwtInboundJwksUrl || null,
+        clock_skew_seconds: Number.isInteger(jwtInboundSkew) ? jwtInboundSkew : 0,
+      },
+      outbound: {
+        enabled: !!jwtOutboundEnabled,
+        header: jwtOutboundHeader || "Authorization",
+        scheme: jwtOutboundScheme || null,
+        issuer: jwtOutboundIssuer || null,
+        audience: jwtOutboundAudience || null,
+        subject: jwtOutboundSubject || null,
+        ttl_seconds: Number.isInteger(jwtOutboundTtl) ? jwtOutboundTtl : 3600,
+      },
     },
     apiKeyPolicy: {
       proxyExpirySeconds,
@@ -1943,6 +2244,15 @@ async function requireIssuerKey(request, env) {
   await requireKeyKind(request, env, "issuer");
 }
 
+async function getIssuerKeyState(env) {
+  const state = await getKeyAuthState("issuer", env);
+  if (!state.current) {
+    const cfg = keyKindConfig("issuer");
+    throw new HttpError(503, cfg.missingCode, cfg.missingMessage);
+  }
+  return state;
+}
+
 async function requireKeyKind(request, env, kind) {
   const { cfg, current, old, oldExpiresAt, primaryCreatedAt, secondaryCreatedAt } = await getKeyAuthState(kind, env);
   if (!current) {
@@ -1991,79 +2301,6 @@ function getAdminAccessTokenFromRequest(request) {
   return match ? match[1].trim() : "";
 }
 
-function utf8ToBytes(str) {
-  return new TextEncoder().encode(String(str || ""));
-}
-
-function bytesToUtf8(bytes) {
-  return new TextDecoder().decode(bytes);
-}
-
-function bytesToBase64Url(bytes) {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-
-function base64UrlToBytes(str) {
-  const normalized = String(str || "").replace(/-/g, "+").replace(/_/g, "/");
-  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
-  const binary = atob(padded);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
-  return out;
-}
-
-function safeJsonParse(text) {
-  try {
-    return JSON.parse(String(text || ""));
-  } catch {
-    return null;
-  }
-}
-
-function constantTimeEqualString(a, b) {
-  const x = String(a || "");
-  const y = String(b || "");
-  if (x.length !== y.length) return false;
-  let diff = 0;
-  for (let i = 0; i < x.length; i++) diff |= x.charCodeAt(i) ^ y.charCodeAt(i);
-  return diff === 0;
-}
-
-async function importHs256Key(secret) {
-  return crypto.subtle.importKey("raw", utf8ToBytes(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
-}
-
-async function signJwtHs256(payloadObj, secret) {
-  const headerB64 = bytesToBase64Url(utf8ToBytes(JSON.stringify({ alg: "HS256", typ: "JWT" })));
-  const payloadB64 = bytesToBase64Url(utf8ToBytes(JSON.stringify(payloadObj)));
-  const input = `${headerB64}.${payloadB64}`;
-  const key = await importHs256Key(secret);
-  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, utf8ToBytes(input)));
-  const sigB64 = bytesToBase64Url(sig);
-  return `${input}.${sigB64}`;
-}
-
-async function verifyJwtHs256(token, secret) {
-  try {
-    const parts = String(token || "").split(".");
-    if (parts.length !== 3) return null;
-    const [h, p, s] = parts;
-    const header = safeJsonParse(bytesToUtf8(base64UrlToBytes(h)));
-    const payload = safeJsonParse(bytesToUtf8(base64UrlToBytes(p)));
-    if (!header || !payload || header.alg !== "HS256" || header.typ !== "JWT") return null;
-    const key = await importHs256Key(secret);
-    const input = `${h}.${p}`;
-    const expectedSig = new Uint8Array(await crypto.subtle.sign("HMAC", key, utf8ToBytes(input)));
-    const expectedSigB64 = bytesToBase64Url(expectedSig);
-    if (!constantTimeEqualString(expectedSigB64, s)) return null;
-    return payload;
-  } catch {
-    return null;
-  }
-}
-
 async function getAdminJwtSecret(env) {
   const configured = String(env?.ADMIN_UI_JWT_SECRET || "").trim();
   if (configured) return configured;
@@ -2079,14 +2316,12 @@ async function getAdminJwtSecret(env) {
 async function validateAdminAccessToken(token, env) {
   if (!token) return false;
   const secret = await getAdminJwtSecret(env);
-  const payload = await verifyJwtHs256(token, secret);
-  if (!payload) return false;
-  const nowSec = Math.floor(Date.now() / 1000);
-  const exp = Number(payload.exp || 0);
-  if (!Number.isFinite(exp) || exp <= nowSec) return false;
-  if (payload.aud !== "apiproxy-admin-ui") return false;
-  if (payload.iss !== "apiproxy") return false;
-  return true;
+  try {
+    await verifyJwtHs256(token, secret, { issuer: "apiproxy", audience: "apiproxy-admin-ui", clock_skew_seconds: 0 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function requireAdminAuth(request, env) {
@@ -3188,6 +3423,7 @@ async function handleRequestCore(request, env, payload, ctx) {
   const transformTimeoutMs = getEnvInt(env, "TRANSFORM_TIMEOUT_MS", DEFAULTS.TRANSFORM_TIMEOUT_MS);
 
   const config = await loadConfigV1(env);
+  const jwtConfig = config?.jwt || DEFAULT_CONFIG_V1.jwt;
   const transformGlobalEnabled = config?.transform?.enabled !== false;
   const outboundTransformConfig = config?.transform?.outbound || DEFAULT_CONFIG_V1.transform.outbound;
   const inboundTransformConfig = config?.transform?.inbound || DEFAULT_CONFIG_V1.transform.inbound;
@@ -3212,6 +3448,32 @@ async function handleRequestCore(request, env, payload, ctx) {
     : null;
   const proxyHost = resolveProxyHostForRequest(request, config);
   const headerForwardingPolicy = getInboundHeaderFilteringPolicy(config);
+
+  if (jwtConfig?.enabled && jwtConfig?.inbound?.enabled) {
+    const token = extractJwtFromHeaders(request.headers, jwtConfig.inbound);
+    if (jwtConfig.inbound.mode === "jwks") {
+      await verifyJwtRs256(token, jwtConfig.inbound);
+    } else {
+      const issuerState = await getIssuerKeyState(env);
+      let verified = false;
+      try {
+        await verifyJwtHs256(token, issuerState.current, jwtConfig.inbound);
+        verified = true;
+      } catch (e) {
+        const now = Date.now();
+        const hasOld = issuerState.old && issuerState.oldExpiresAt && issuerState.oldExpiresAt > now;
+        if (hasOld) {
+          await verifyJwtHs256(token, issuerState.old, jwtConfig.inbound);
+          verified = true;
+        } else {
+          throw e;
+        }
+      }
+      if (!verified) {
+        throw new HttpError(401, "JWT_INVALID", "JWT signature invalid");
+      }
+    }
+  }
 
   if (transformGlobalEnabled && outboundTransformConfig.enabled) {
     const outboundCtx = {
@@ -3315,6 +3577,24 @@ async function handleRequestCore(request, env, payload, ctx) {
   const enrichedHeaders = await loadEnrichedHeadersMap(env);
   for (const [name, value] of Object.entries(enrichedHeaders)) {
     upstreamHeaders.set(name, value);
+  }
+
+  if (jwtConfig?.enabled && jwtConfig?.outbound?.enabled) {
+    const issuerState = await getIssuerKeyState(env);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const ttl = Number.isInteger(jwtConfig.outbound.ttl_seconds) ? jwtConfig.outbound.ttl_seconds : 3600;
+    const payload = {
+      iat: nowSec,
+      exp: nowSec + ttl,
+    };
+    if (jwtConfig.outbound.issuer) payload.iss = jwtConfig.outbound.issuer;
+    if (jwtConfig.outbound.audience) payload.aud = jwtConfig.outbound.audience;
+    if (jwtConfig.outbound.subject) payload.sub = jwtConfig.outbound.subject;
+    const token = await signJwtHs256(payload, issuerState.current);
+    const headerName = jwtConfig.outbound.header || "Authorization";
+    const scheme = jwtConfig.outbound.scheme === null ? "" : String(jwtConfig.outbound.scheme || "Bearer").trim();
+    const value = scheme ? `${scheme} ${token}` : token;
+    upstreamHeaders.set(headerName, value);
   }
 
   let upstreamBody;

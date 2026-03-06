@@ -163,55 +163,24 @@
           const prefix = text.trim().length ? 'proxyName: ' + value + '\n' : 'proxyName: ' + value + '\n';
           return prefix + text;
         }
-        function parseJwtEnabledFromYaml(yamlText) {
-          const text = String(yamlText || '');
-          const lines = text.split('\n');
-          let inJwt = false;
-          for (const line of lines) {
-            if (/^\S/.test(line)) {
-              if (line.startsWith('jwt:')) {
-                inJwt = true;
-                continue;
-              }
-              if (inJwt) break;
-            }
-            if (inJwt) {
-              const match = line.match(/^\s+enabled:\s*(true|false)\s*$/);
-              if (match) return match[1].toLowerCase() === 'true';
-            }
+        async function fetchConfigJsonFromYaml() {
+          const yamlText = await apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true);
+          const res = await fetch(ADMIN_ROOT + '/config/validate', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'text/yaml' },
+            body: yamlText,
+          });
+          if (res.status === 401) {
+            handleUnauthorized();
+            throw new Error('Unauthorized (401)');
           }
-          return false;
-        }
-        function applyJwtEnabledToYaml(yamlText, enabled) {
-          const value = enabled ? 'true' : 'false';
-          const text = String(yamlText || '');
-          const lines = text.split('\n');
-          let inJwt = false;
-          let jwtLineIndex = -1;
-          for (let i = 0; i < lines.length; i += 1) {
-            const line = lines[i];
-            if (/^\S/.test(line)) {
-              if (line.startsWith('jwt:')) {
-                inJwt = true;
-                jwtLineIndex = i;
-                continue;
-              }
-              if (inJwt) break;
-            }
-            if (inJwt) {
-              if (/^\s+enabled:\s*(true|false)\s*$/.test(line)) {
-                lines[i] = '  enabled: ' + value;
-                return lines.join('\n');
-              }
-            }
+          const txt = await res.text();
+          let parsed = null;
+          try { parsed = JSON.parse(txt); } catch {}
+          if (!res.ok || !parsed?.data?.config) {
+            throw new Error('Failed to load config JSON');
           }
-          if (jwtLineIndex >= 0) {
-            const insertAt = jwtLineIndex + 1;
-            lines.splice(insertAt, 0, '  enabled: ' + value);
-            return lines.join('\n');
-          }
-          const prefix = text.trim().length ? 'jwt:\n  enabled: ' + value + '\n' : 'jwt:\n  enabled: ' + value + '\n';
-          return prefix + text;
+          return parsed.data.config;
         }
         function parseInboundHeaderFilteringFromYaml(yamlText) {
           const text = String(yamlText || '');
@@ -275,6 +244,59 @@
           const on = !!enabled;
           if (el('jwt-enabled')) el('jwt-enabled').checked = on;
           if (el('jwt-fields')) el('jwt-fields').style.display = on ? 'block' : 'none';
+        }
+        function setJwtInboundEnabled(enabled) {
+          const on = !!enabled;
+          if (el('jwt-inbound-enabled')) el('jwt-inbound-enabled').checked = on;
+          if (el('jwt-inbound-fields')) el('jwt-inbound-fields').style.display = on ? 'block' : 'none';
+        }
+        function setJwtOutboundEnabled(enabled) {
+          const on = !!enabled;
+          if (el('jwt-outbound-enabled')) el('jwt-outbound-enabled').checked = on;
+          if (el('jwt-outbound-fields')) el('jwt-outbound-fields').style.display = on ? 'block' : 'none';
+        }
+        function updateJwtModeFields(modeValue) {
+          const mode = String(modeValue || 'shared_secret');
+          if (el('jwt-inbound-mode')) el('jwt-inbound-mode').value = mode;
+          if (el('jwt-inbound-jwks-fields')) el('jwt-inbound-jwks-fields').style.display = mode === 'jwks' ? 'block' : 'none';
+          if (el('jwt-inbound-shared-note')) el('jwt-inbound-shared-note').style.display = mode === 'shared_secret' ? 'block' : 'none';
+        }
+        function normalizeOptionalString(value) {
+          const v = String(value || '').trim();
+          return v ? v : null;
+        }
+        function normalizeOptionalInt(value) {
+          const v = String(value == null ? '' : value).trim();
+          if (!v) return null;
+          const n = Number(v);
+          if (!Number.isInteger(n) || n < 0) throw new Error('JWT numeric fields must be positive integers.');
+          return n;
+        }
+        async function loadJwtConfig() {
+          try {
+            const config = await fetchConfigJsonFromYaml();
+            const jwt = config?.jwt || {};
+            const inbound = jwt.inbound || {};
+            const outbound = jwt.outbound || {};
+            setJwtEnabled(jwt.enabled !== false);
+            setJwtInboundEnabled(!!inbound.enabled);
+            setJwtOutboundEnabled(!!outbound.enabled);
+            updateJwtModeFields(inbound.mode || 'shared_secret');
+            if (el('jwt-inbound-header')) el('jwt-inbound-header').value = String(inbound.header || 'Authorization');
+            if (el('jwt-inbound-scheme')) el('jwt-inbound-scheme').value = String(inbound.scheme || 'Bearer');
+            if (el('jwt-inbound-issuer')) el('jwt-inbound-issuer').value = inbound.issuer || '';
+            if (el('jwt-inbound-audience')) el('jwt-inbound-audience').value = inbound.audience || '';
+            if (el('jwt-inbound-jwks-url')) el('jwt-inbound-jwks-url').value = inbound.jwks_url || '';
+            if (el('jwt-inbound-skew')) el('jwt-inbound-skew').value = inbound.clock_skew_seconds == null ? '' : String(inbound.clock_skew_seconds);
+            if (el('jwt-outbound-header')) el('jwt-outbound-header').value = String(outbound.header || 'Authorization');
+            if (el('jwt-outbound-scheme')) el('jwt-outbound-scheme').value = String(outbound.scheme || 'Bearer');
+            if (el('jwt-outbound-issuer')) el('jwt-outbound-issuer').value = outbound.issuer || '';
+            if (el('jwt-outbound-audience')) el('jwt-outbound-audience').value = outbound.audience || '';
+            if (el('jwt-outbound-subject')) el('jwt-outbound-subject').value = outbound.subject || '';
+            if (el('jwt-outbound-ttl')) el('jwt-outbound-ttl').value = outbound.ttl_seconds == null ? '' : String(outbound.ttl_seconds);
+          } catch {
+            // no-op
+          }
         }
         function openConfigTab() {
           document.querySelector('.tab-btn[data-tab="config"]')?.click();
@@ -576,7 +598,6 @@
             }
             if (el('config-yaml')) el('config-yaml').value = text;
             if (el('proxy-name')) el('proxy-name').value = parseProxyNameFromYaml(text);
-            setJwtEnabled(parseJwtEnabledFromYaml(text));
             updateProxyHeader(el('proxy-name')?.value || '');
             setConfigValidationError('');
             setConfigSaveEnabled(true);
@@ -715,6 +736,7 @@
             if (el('kr-admin-expiry')) el('kr-admin-expiry').value = d.admin_expiry_seconds == null ? '' : String(d.admin_expiry_seconds);
             if (el('kr-output')) el('kr-output').textContent = '';
             clearDirty('outbound-auth');
+            await loadJwtConfig();
           } catch (e) {
             setOutput('kr-output', String(e.message || e));
           }
@@ -760,12 +782,38 @@
         }
         async function inboundAuthSave() {
           try {
-            const yaml = await apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true);
-            const updatedYaml = applyJwtEnabledToYaml(yaml, !!el('jwt-enabled')?.checked);
+            const config = await fetchConfigJsonFromYaml();
+            const jwtEnabled = !!el('jwt-enabled')?.checked;
+            const inboundEnabled = !!el('jwt-inbound-enabled')?.checked;
+            const outboundEnabled = !!el('jwt-outbound-enabled')?.checked;
+            const inboundMode = el('jwt-inbound-mode')?.value || 'shared_secret';
+            const jwtConfig = {
+              enabled: jwtEnabled,
+              inbound: {
+                enabled: inboundEnabled,
+                mode: inboundMode,
+                header: normalizeOptionalString(el('jwt-inbound-header')?.value) || 'Authorization',
+                scheme: normalizeOptionalString(el('jwt-inbound-scheme')?.value),
+                issuer: normalizeOptionalString(el('jwt-inbound-issuer')?.value),
+                audience: normalizeOptionalString(el('jwt-inbound-audience')?.value),
+                jwks_url: inboundMode === 'jwks' ? normalizeOptionalString(el('jwt-inbound-jwks-url')?.value) : null,
+                clock_skew_seconds: normalizeOptionalInt(el('jwt-inbound-skew')?.value),
+              },
+              outbound: {
+                enabled: outboundEnabled,
+                header: normalizeOptionalString(el('jwt-outbound-header')?.value) || 'Authorization',
+                scheme: normalizeOptionalString(el('jwt-outbound-scheme')?.value),
+                issuer: normalizeOptionalString(el('jwt-outbound-issuer')?.value),
+                audience: normalizeOptionalString(el('jwt-outbound-audience')?.value),
+                subject: normalizeOptionalString(el('jwt-outbound-subject')?.value),
+                ttl_seconds: normalizeOptionalInt(el('jwt-outbound-ttl')?.value),
+              },
+            };
+            config.jwt = jwtConfig;
             const cfgRes = await fetch(ADMIN_ROOT + '/config', {
               method: 'PUT',
-              headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'text/yaml' },
-              body: updatedYaml,
+              headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'application/json' },
+              body: JSON.stringify(config),
             });
             if (cfgRes.status === 401) {
               handleUnauthorized();
@@ -1674,6 +1722,18 @@
            });
           el('outbound-mode')?.addEventListener('change', () => {
             setOutboundMode(el('outbound-mode')?.value || 'autorotation');
+          });
+          el('jwt-enabled')?.addEventListener('change', () => {
+            setJwtEnabled(!!el('jwt-enabled')?.checked);
+          });
+          el('jwt-inbound-enabled')?.addEventListener('change', () => {
+            setJwtInboundEnabled(!!el('jwt-inbound-enabled')?.checked);
+          });
+          el('jwt-outbound-enabled')?.addEventListener('change', () => {
+            setJwtOutboundEnabled(!!el('jwt-outbound-enabled')?.checked);
+          });
+          el('jwt-inbound-mode')?.addEventListener('change', () => {
+            updateJwtModeFields(el('jwt-inbound-mode')?.value || 'shared_secret');
           });
           el('inbound-header-filtering-mode')?.addEventListener('change', () => {
             updateInboundHeaderFilteringHelp(el('inbound-header-filtering-mode')?.value || 'blacklist');
