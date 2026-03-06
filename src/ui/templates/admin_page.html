@@ -39,37 +39,41 @@
            <div id="overview-output" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;">Click "Refresh status".</div>
            <button type="button" id="overview-refresh-btn">Refresh status</button>
          </div>
-         <div id="tab-debug" class="tab-panel" style="display:none;">
+        <div id="tab-debug" class="tab-panel" style="display:none;">
            <p><b>Logging controls</b></p>
-           <div id="logging-status" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin:10px 0;">Logging enabled: no</div>
-           <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
-             <button type="button" id="debug-enable-btn">Enable Logging</button>
-             <button type="button" id="debug-disable-btn">Disable Logging</button>
-           </div>
+           <div id="logging-status" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin:10px 0;">Loading logging status...</div>
            <p style="margin-top:10px;margin-bottom:4px;">Logging TTL remaining (seconds): <span id="logging-ttl-remaining">0</span></p>
+           <p style="margin-top:6px;margin-bottom:4px;">Logging expires in (seconds): <span id="logging-ttl-remaining-2">0</span> <a href="#" id="logging-ttl-refresh-link">refresh</a></p>
            <label for="logging-ttl-seconds" style="display:block;margin:8px 0 4px;">Logging TTL</label>
            <input id="logging-ttl-seconds" type="number" min="1" step="1" value="3600"
              style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
-           <p style="margin-top:12px;margin-bottom:6px;">Logging output appears here.</p>
+           <p style="margin-top:12px;margin-bottom:6px;">Last Log</p>
            <pre id="debug-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;">Debug output appears here.</pre>
            <p style="margin-top:10px;"><a href="#" id="debug-refresh-trace-link">Refresh last trace</a></p>
-           <p style="margin-top:16px;"><b>Logging configuration</b></p>
-           <label for="logging-config-url" style="display:block;margin:8px 0 4px;">Logging Endpoint URL</label>
-           <input id="logging-config-url" type="text" readonly
-             style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;margin-bottom:8px;" />
-           <label for="logging-config-auth-header" style="display:block;margin:2px 0 4px;">Logging Auth Header</label>
-           <input id="logging-config-auth-header" type="text" readonly
-             style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;margin-bottom:8px;" />
+           <p style="margin-top:16px;"><b>External Logging Configuration</b></p>
+           <label style="display:flex;gap:8px;align-items:center;margin:8px 0 6px;">
+             <input id="logging-config-enabled" type="checkbox" />
+             <span>Use external logging endpoint</span>
+           </label>
+           <div id="logging-config-fields" style="display:none;">
+             <label for="logging-config-url" style="display:block;margin:8px 0 4px;">Logging Endpoint URL</label>
+             <input id="logging-config-url" type="text" readonly
+               style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;margin-bottom:8px;" />
+             <label for="logging-config-auth-header" style="display:block;margin:2px 0 4px;">Logging Auth Header</label>
+             <input id="logging-config-auth-header" type="text" readonly
+               style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;margin-bottom:8px;" />
+           </div>
            <label for="logging-secret" style="display:block;margin:2px 0 4px;">Logging auth secret</label>
            <input id="logging-secret" type="password" placeholder="set logging auth secret"
              style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
            <p style="font-size:13px;color:#475569;margin:4px 0 0 0;">Logging secrets are managed via this API only and are not stored in YAML.</p>
-           <div style="margin-top:10px;">
-             <button type="button" id="logging-secret-save-btn">Save</button>
-           </div>
-           <pre id="logging-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Logging output appears here.</pre>
-         </div>
-         <div id="tab-config" class="tab-panel" style="display:none;">
+           <div style="margin-top:10px;"></div>
+          <pre id="logging-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Logging output appears here.</pre>
+          <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
+            <button type="button" id="footer-save-logging" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
+          </div>
+        </div>
+        <div id="tab-config" class="tab-panel" style="display:none;">
            <p><b>YAML config</b></p>
            <label for="proxy-name" style="display:block;margin:8px 0 4px;">Proxy name</label>
            <input id="proxy-name" type="text" placeholder="friendly name"
@@ -78,16 +82,18 @@
              style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"></textarea>
            <p id="config-validation-error" style="display:none;margin:6px 0 0;color:#b91c1c;font-size:14px;"></p>
            <div style="margin-top:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-             <button type="button" id="config-save-btn">Save</button>
              <a href="#" id="config-reload-link">Reload config</a>
              <a href="#" id="config-test-rule-link">Test rule</a>
            </div>
            <p style="margin:10px 0 6px;"><b>Test rule payload (JSON)</b></p>
            <textarea id="config-test-rule-input" rows="8"
-             style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">{"sample":{"status":500,"headers":{"content-type":"application/json"},"type":"json","body":{"error":"bad"}}}</textarea>
-           <pre id="config-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Config output appears here.</pre>
-         </div>
-         <div id="tab-outbound-auth" class="tab-panel" style="display:none;">
+             style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"></textarea>
+          <pre id="config-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Config output appears here.</pre>
+          <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
+            <button type="button" id="footer-save-config" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
+          </div>
+        </div>
+        <div id="tab-outbound-auth" class="tab-panel" style="display:none;">
            <p><b>Outbound Auth</b></p>
            <label style="display:flex;gap:8px;align-items:center;margin:8px 0 10px;">
              <input id="outbound-auth-enabled" type="checkbox" />
@@ -150,12 +156,13 @@
            <input id="kr-retry-on-401" type="checkbox" />
            </div>
            </div>
-           <div style="margin-top:10px;">
-             <button type="button" id="kr-save-btn-bottom">Store Secret</button>
-           </div>
-           <pre id="kr-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Key rotation output appears here.</pre>
-         </div>
-         <div id="tab-outbound-transform" class="tab-panel" style="display:none;">
+           <div style="margin-top:10px;"></div>
+          <pre id="kr-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Key rotation output appears here.</pre>
+          <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
+            <button type="button" id="footer-save-outbound-auth" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
+          </div>
+        </div>
+        <div id="tab-outbound-transform" class="tab-panel" style="display:none;">
            <p><b>Outbound Transformations</b></p>
            <label style="display:flex;gap:8px;align-items:center;margin:8px 0 12px;">
              <input id="transform-global-enabled-outbound" type="checkbox" />
@@ -177,59 +184,71 @@
            </div>
            <hr style="margin:16px 0;border:none;border-top:1px solid #e2e8f0;" />
            <p><b>Enrichments</b></p>
-           <label for="header-name" style="display:block;margin:8px 0 4px;">Header Key</label>
-           <input id="header-name" type="text" placeholder="authorization"
-             style="width:100%;max-width:460px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
-           <label for="header-value" style="display:block;margin:2px 0 4px;">Header Value/Secret</label>
-           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-             <input id="header-value" type="password" placeholder="header value/secret"
-               style="width:100%;max-width:360px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
-             <a href="#" id="header-value-toggle-btn" style="margin-bottom:8px;font-size:12px;text-decoration:underline;">show</a>
-           </div>
-           <div style="display:flex;gap:8px;flex-wrap:wrap;">
-             <button type="button" id="headers-save-btn">Add header</button>
+           <div id="headers-input-table" style="margin-top:8px;">
+             <table style="width:100%;border-collapse:collapse;">
+               <thead>
+                 <tr>
+                   <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e2e8f0;">Header Key</th>
+                   <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e2e8f0;">Header Value</th>
+                   <th style="width:1%;padding:6px 8px;border-bottom:1px solid #e2e8f0;"></th>
+                 </tr>
+               </thead>
+               <tbody id="headers-input-body"></tbody>
+             </table>
+             <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+               <button type="button" id="headers-add-row-btn">Add header row</button>
+               <button type="button" id="headers-save-btn">Save headers</button>
+             </div>
            </div>
            <div id="headers-list" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;"></div>
-           <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
-             <button type="button" id="outbound-transform-save-btn">Save Outbound Transformations</button>
-           </div>
-           <pre id="headers-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Outbound transformation output appears here.</pre>
-         </div>
-         <div id="tab-inbound-auth" class="tab-panel" style="display:none;">
+          <pre id="headers-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Outbound transformation output appears here.</pre>
+          <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
+            <button type="button" id="footer-save-outbound-transform" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
+          </div>
+        </div>
+        <div id="tab-inbound-auth" class="tab-panel" style="display:none;">
            <p><b>Inbound Auth</b></p>
            <label for="kr-proxy-expiry" style="display:block;margin:10px 0 4px;">Proxy Key Expiry Seconds</label>
-           <input id="kr-proxy-expiry" type="text" value="null"
+           <input id="kr-proxy-expiry" type="text" placeholder="n/a"
              style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
            <label for="kr-issuer-expiry" style="display:block;margin:10px 0 4px;">Target Auth Key Expiry Seconds</label>
-           <input id="kr-issuer-expiry" type="text" value="null"
+           <input id="kr-issuer-expiry" type="text" placeholder="n/a"
              style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
-           <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
-             <button type="button" id="inbound-save-btn">Save</button>
+           <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;"></div>
+           <div style="display:flex;align-items:center;gap:8px;margin:10px 0 6px;">
+             <b>Proxy Key Status</b>
+             <a href="#" id="keys-refresh-link-inbound">refresh</a>
            </div>
            <div id="keys-status-inbound" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin-bottom:10px;">Key status will appear here.</div>
            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-             <button type="button" id="keys-refresh-btn">Refresh key status</button>
              <button type="button" id="rotate-proxy-btn">Rotate proxy key</button>
              <button type="button" id="rotate-issuer-btn">Rotate target auth key</button>
            </div>
-           <pre id="keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Rotation output appears here.</pre>
-         </div>
-         <div id="tab-admin-auth" class="tab-panel" style="display:none;">
+          <pre id="keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Rotation output appears here.</pre>
+          <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
+            <button type="button" id="footer-save-inbound-auth" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
+          </div>
+        </div>
+        <div id="tab-admin-auth" class="tab-panel" style="display:none;">
            <p><b>Admin Auth</b></p>
            <label for="kr-admin-expiry" style="display:block;margin:10px 0 4px;">Admin Key Expiry Seconds</label>
-           <input id="kr-admin-expiry" type="text" value="null"
+           <input id="kr-admin-expiry" type="text" placeholder="n/a"
              style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
-           <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
-             <button type="button" id="admin-save-btn">Save</button>
+           <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;"></div>
+           <div style="display:flex;align-items:center;gap:8px;margin:10px 0 6px;">
+             <b>Admin Key Status</b>
+             <a href="#" id="keys-refresh-link-admin">refresh</a>
            </div>
            <div id="keys-status-admin" style="padding:12px;border:1px solid #ddd;border-radius:8px;line-height:1.6;margin-bottom:10px;">Admin key status will appear here.</div>
            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-             <button type="button" id="admin-keys-refresh-btn">Refresh admin key status</button>
              <button type="button" id="rotate-admin-btn">Rotate admin key</button>
            </div>
-           <pre id="admin-keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Admin rotation output appears here.</pre>
-         </div>
-         <div id="tab-inbound-transform" class="tab-panel" style="display:none;">
+          <pre id="admin-keys-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Admin rotation output appears here.</pre>
+          <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
+            <button type="button" id="footer-save-admin-auth" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
+          </div>
+        </div>
+        <div id="tab-inbound-transform" class="tab-panel" style="display:none;">
            <p><b>Inbound Transformations</b></p>
            <label style="display:flex;gap:8px;align-items:center;margin:8px 0 12px;">
              <input id="transform-global-enabled-inbound" type="checkbox" />
@@ -249,11 +268,12 @@
            <div style="margin-top:8px;">
              <button type="button" id="inbound-add-rule-btn">Add rule</button>
            </div>
-           <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
-             <button type="button" id="inbound-transform-save-btn">Save Inbound Transformations</button>
-           </div>
-           <pre id="inbound-transform-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Inbound transformation output appears here.</pre>
-         </div>
+           <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;"></div>
+          <pre id="inbound-transform-output" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Inbound transformation output appears here.</pre>
+          <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
+            <button type="button" id="footer-save-inbound-transform" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
+          </div>
+        </div>
          <div id="tab-sandbox" class="tab-panel" style="display:none;">
            <p><b>API Sandbox</b></p>
            <div style="flex:1;min-width:340px;">
@@ -288,7 +308,8 @@
                <button type="button" id="sandbox-send-btn">Make HTTP Request</button>
              </div>
            </div>
-           <p style="margin-top:10px;"><b>Formed request (curl, redacted)</b></p>
+           <p style="margin-top:10px;"><b>cURL</b></p>
+           <div style="font-size:12px;color:#64748b;margin-top:-4px;margin-bottom:6px;">secrets redacted</div>
            <pre id="sandbox-request" style="margin-top:6px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">curl preview appears here.</pre>
            <p style="margin-top:10px;"><b>Response</b></p>
            <pre id="sandbox-response" style="margin-top:6px;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;">Response appears here.</pre>

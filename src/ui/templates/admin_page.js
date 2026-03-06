@@ -1,12 +1,14 @@
          const ADMIN_ROOT = '/_apiproxy/admin';
          const ADMIN_ACCESS_TOKEN_STORAGE = 'apiproxy_admin_access_token_v1';
          let currentKey = '';
-         let pendingDeleteHeaderName = '';
-         let configValidateTimer = null;
-         let sandboxTemplateKey = '';
-         let sandboxSyncingControls = false;
-         let outboundRuleDrafts = [];
-         let inboundRuleDrafts = [];
+        let pendingDeleteHeaderName = '';
+        let configValidateTimer = null;
+        let sandboxTemplateKey = '';
+        let sandboxSyncingControls = false;
+        let outboundRuleDrafts = [];
+        let inboundRuleDrafts = [];
+        let currentTabName = 'overview';
+        const dirtyTabs = new Set();
          const SANDBOX_TEMPLATES = {
            status_page: { label: 'GET /_apiproxy', method: 'GET', path: '/_apiproxy', auth_mode: 'none', headers: {}, body: null },
            request_passthrough: {
@@ -63,15 +65,23 @@
            admin_outbound_get: { label: 'GET /_apiproxy/admin/key-rotation-config', method: 'GET', path: '/_apiproxy/admin/key-rotation-config', auth_mode: 'admin_token', headers: {}, body: null },
          };
          const SANDBOX_API_PREFIX = '/_apiproxy';
-         const SANDBOX_REDACT_HEADERS = new Set([
-           'authorization',
-           'proxy-authorization',
-           'cookie',
-           'set-cookie',
-           'x-proxy-key',
-           'x-admin-key',
-           'x-issuer-key',
-         ]);
+        const SANDBOX_REDACT_HEADERS = new Set([
+          'authorization',
+          'proxy-authorization',
+          'cookie',
+          'set-cookie',
+          'x-proxy-key',
+          'x-admin-key',
+          'x-issuer-key',
+        ]);
+        const UI_DEBUG = (() => {
+          try {
+            const params = new URLSearchParams(window.location.search || '');
+            return params.get('debug') === 'true';
+          } catch {
+            return false;
+          }
+        })();
 
          function el(id) { return document.getElementById(id); }
          function setOutput(id, data) {
@@ -114,11 +124,23 @@
            }
          }
         function setConfigSaveEnabled(enabled) {
-          const btn = el('config-save-btn');
+          const btn = el('footer-save-config');
           if (!btn) return;
           btn.disabled = !enabled;
           btn.style.opacity = enabled ? '1' : '0.5';
           btn.style.cursor = enabled ? 'pointer' : 'not-allowed';
+        }
+        function markDirty(tabName) {
+          if (!tabName) return;
+          dirtyTabs.add(tabName);
+        }
+        function clearDirty(tabName) {
+          if (!tabName) return;
+          dirtyTabs.delete(tabName);
+        }
+        function confirmLeaveDirty(tabName) {
+          if (!dirtyTabs.has(tabName)) return true;
+          return window.confirm('Are you sure you want to leave this page before saving?');
         }
         function parseProxyNameFromYaml(yamlText) {
           const text = String(yamlText || '');
@@ -221,10 +243,14 @@
             if (el('admin-auth')) el('admin-auth').style.display = 'block';
             showWarning('Session logged out. Provide admin key again to login.');
          }
-         async function apiCall(path, method, body, expectText) {
-           if (!currentKey) {
-             throw new Error('Login first.');
-            }
+        async function apiCall(path, method, body, expectText) {
+          if (!currentKey) {
+            throw new Error('Login first.');
+           }
+           if (UI_DEBUG) {
+             const safeBody = (path.includes('/config') || typeof body === 'string') ? '(redacted)' : body;
+             console.log('[api]', method, path, safeBody === undefined ? '' : safeBody);
+           }
            const headers = { 'Authorization': 'Bearer ' + currentKey };
            if (body !== undefined && !expectText) headers['Content-Type'] = 'application/json';
            if (expectText) headers['Accept'] = 'text/plain';
@@ -241,13 +267,15 @@
            if (expectText) return text;
            try { return JSON.parse(text); } catch { return text; }
          }
-         function attachTabs() {
-           const btns = document.querySelectorAll('.tab-btn');
-           const panels = document.querySelectorAll('.tab-panel');
-           function setActiveTab(name) {
-             panels.forEach((panel) => {
-               panel.style.display = panel.id === 'tab-' + name ? 'block' : 'none';
-             });
+        function attachTabs() {
+          const btns = document.querySelectorAll('.tab-btn');
+          const panels = document.querySelectorAll('.tab-panel');
+          function setActiveTab(name) {
+            if (name === currentTabName) return;
+            if (!confirmLeaveDirty(currentTabName)) return;
+            panels.forEach((panel) => {
+              panel.style.display = panel.id === 'tab-' + name ? 'block' : 'none';
+            });
              btns.forEach((btn) => {
                const active = btn.getAttribute('data-tab') === name;
                btn.style.background = active ? '#111827' : '#fff';
@@ -263,6 +291,9 @@
             if (name === 'outbound-transform') {
               transformConfigLoad();
               headersList();
+              if (el('headers-input-body') && !el('headers-input-body').children.length) {
+                addHeaderInputRow('', '');
+              }
             }
             if (name === 'admin-auth') {
               keysRefresh();
@@ -272,8 +303,9 @@
               keysRefresh();
             }
              if (name === 'inbound-transform') transformConfigLoad();
-             if (name === 'sandbox') sandboxInit();
-           }
+            if (name === 'sandbox') sandboxInit();
+            currentTabName = name;
+          }
            btns.forEach((btn) => {
              btn.style.padding = '8px 10px';
              btn.style.border = '1px solid #cbd5e1';
@@ -289,20 +321,21 @@
                setActiveTab(name);
              });
            });
-           setActiveTab('overview');
-         }
-         function formatOverviewStatus(version, debug, headers, targetHost) {
-           const versionText = version?.data?.version || 'unknown';
-           const debugData = debug?.data || {};
-           const debugEnabled = !!debugData.enabled;
-           const enrichedHeaders = Array.isArray(headers?.enriched_headers)
-             ? headers.enriched_headers
-             : (Array.isArray(headers?.data?.enriched_headers) ? headers.data.enriched_headers : []);
-           return '<div><b>Build Version:</b> ' + versionText + '</div>'
-             + '<div><b>Debug Enabled:</b> ' + (debugEnabled ? 'yes' : 'no') + '</div>'
-             + '<div><b>Target URL:</b> ' + (targetHost || '(not set)') + '</div>'
-             + '<div><b>Enrichments:</b> ' + (enrichedHeaders.length ? enrichedHeaders.join(', ') : '(none)') + '</div>';
-         }
+          setActiveTab('overview');
+        }
+        function formatOverviewStatus(version, debug, headers, targetHost, proxyName) {
+          const versionText = version?.data?.version || 'unknown';
+          const debugData = debug?.data || {};
+          const debugEnabled = !!debugData.enabled;
+          const enrichedHeaders = Array.isArray(headers?.enriched_headers)
+            ? headers.enriched_headers
+            : (Array.isArray(headers?.data?.enriched_headers) ? headers.data.enriched_headers : []);
+          return '<div><b>Proxy Name:</b> ' + (proxyName || 'n/a') + '</div>'
+            + '<div><b>Build Version:</b> ' + versionText + '</div>'
+            + '<div><b>Debug Enabled:</b> ' + (debugEnabled ? 'yes' : 'no') + '</div>'
+            + '<div><b>Target URL:</b> ' + (targetHost || 'n/a') + '</div>'
+            + '<div><b>Enrichments:</b> ' + (enrichedHeaders.length ? enrichedHeaders.join(', ') : 'n/a') + '</div>';
+        }
          async function refreshOverview() {
            try {
              const [version, debug, headers, yamlText] = await Promise.all([
@@ -311,22 +344,26 @@
                apiCall(ADMIN_ROOT + '/headers', 'GET'),
                apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true),
              ]);
-             let targetHost = '';
-             try {
-               const res = await fetch(ADMIN_ROOT + '/config/validate', {
-                 method: 'POST',
-                 headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'text/yaml' },
-                 body: yamlText,
-               });
-               const txt = await res.text();
-               const parsed = JSON.parse(txt);
-               if (res.ok) targetHost = parsed?.data?.config?.targetHost || '';
-             } catch {}
-             setHtml('overview-output', formatOverviewStatus(version, debug, headers, targetHost));
-           } catch (e) {
-             setOutput('overview-output', String(e.message || e));
-           }
-         }
+            let targetHost = '';
+            let proxyName = '';
+            try {
+              const res = await fetch(ADMIN_ROOT + '/config/validate', {
+                method: 'POST',
+                headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'text/yaml' },
+                body: yamlText,
+              });
+              const txt = await res.text();
+              const parsed = JSON.parse(txt);
+              if (res.ok) {
+                targetHost = parsed?.data?.config?.targetHost || '';
+                proxyName = parsed?.data?.config?.proxyName || '';
+              }
+            } catch {}
+            setHtml('overview-output', formatOverviewStatus(version, debug, headers, targetHost, proxyName));
+          } catch (e) {
+            setOutput('overview-output', String(e.message || e));
+          }
+        }
          async function debugEnable() {
            try {
              const ttl = Number(el('logging-ttl-seconds')?.value || 0);
@@ -349,15 +386,16 @@
            try { setOutput('debug-output', await apiCall(ADMIN_ROOT + '/debug/last', 'GET', undefined, true)); }
            catch (e) { setOutput('debug-output', String(e.message || e)); }
          }
-         async function loggingSecretSave() {
-           try {
-             const payload = { value: el('logging-secret')?.value || '' };
-             setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug/loggingSecret', 'PUT', payload));
-             await loadLoggingStatus();
-           } catch (e) {
-             setOutput('logging-output', String(e.message || e));
-           }
-         }
+        async function loggingSecretSave() {
+          try {
+            const payload = { value: el('logging-secret')?.value || '' };
+            setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug/loggingSecret', 'PUT', payload));
+            await loadLoggingStatus();
+            clearDirty('debug');
+          } catch (e) {
+            setOutput('logging-output', String(e.message || e));
+          }
+        }
          async function loggingSecretDelete() {
            try {
              setOutput('logging-output', await apiCall(ADMIN_ROOT + '/debug/loggingSecret', 'DELETE'));
@@ -389,25 +427,35 @@
                 endpointAuthHeader = cfg.auth_header || '';
                }
              } catch {}
-             if (el('logging-config-url')) el('logging-config-url').value = endpointUrl;
-             if (el('logging-config-auth-header')) el('logging-config-auth-header').value = endpointAuthHeader;
-             const d = debugStatus?.data || {};
-             const enabledText = d.enabled ? 'yes' : 'no';
-             if (el('logging-status')) {
-               el('logging-status').textContent = 'Logging enabled: ' + enabledText;
-             }
-             if (el('logging-ttl-remaining')) {
-               el('logging-ttl-remaining').textContent = String(Number(d.ttl_remaining_seconds || 0));
-             }
-             if (el('logging-ttl-seconds') && Number(d.max_ttl_seconds || 0) > 0 && !el('logging-ttl-seconds').value) {
-               el('logging-ttl-seconds').value = String(Number(d.max_ttl_seconds));
-             }
-             const secretSet = !!secretStatus?.data?.logging_secret_set;
-             setOutput('logging-output', 'Logging secret set: ' + (secretSet ? 'yes' : 'no'));
-           } catch (e) {
-             setOutput('logging-output', String(e.message || e));
-           }
-         }
+            if (el('logging-config-url')) el('logging-config-url').value = endpointUrl;
+            if (el('logging-config-auth-header')) el('logging-config-auth-header').value = endpointAuthHeader;
+            const d = debugStatus?.data || {};
+            const enabledText = d.enabled ? 'enabled' : 'disabled';
+            if (el('logging-status')) {
+              const html = d.enabled
+                ? '<a href="#" id="logging-disable-link">disable</a> | ' + enabledText
+                : enabledText + ' | <a href="#" id="logging-enable-link">enable</a>';
+              setHtml('logging-status', html);
+            }
+            const ttlRemaining = Number.isFinite(Number(d.ttl_remaining_seconds)) ? Number(d.ttl_remaining_seconds) : null;
+            if (el('logging-ttl-remaining')) {
+              el('logging-ttl-remaining').textContent = ttlRemaining === null ? 'n/a' : String(ttlRemaining);
+            }
+            if (el('logging-ttl-remaining-2')) {
+              el('logging-ttl-remaining-2').textContent = ttlRemaining === null ? 'n/a' : String(ttlRemaining);
+            }
+            if (el('logging-ttl-seconds') && Number(d.max_ttl_seconds || 0) > 0 && !el('logging-ttl-seconds').value) {
+              el('logging-ttl-seconds').value = String(Number(d.max_ttl_seconds));
+            }
+            const configEnabled = !!(endpointUrl || endpointAuthHeader);
+            if (el('logging-config-enabled')) el('logging-config-enabled').checked = configEnabled;
+            if (el('logging-config-fields')) el('logging-config-fields').style.display = configEnabled ? 'block' : 'none';
+            const secretSet = !!secretStatus?.data?.logging_secret_set;
+            setOutput('logging-output', 'Logging secret set: ' + (secretSet ? 'yes' : 'no'));
+          } catch (e) {
+            setOutput('logging-output', String(e.message || e));
+          }
+        }
         async function configLoad() {
           try {
             const text = await apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true);
@@ -417,6 +465,7 @@
             setConfigValidationError('');
             setConfigSaveEnabled(true);
             setOutput('config-output', 'Config reloaded from proxy.');
+            clearDirty('config');
           } catch (e) {
              setOutput('config-output', String(e.message || e));
              setConfigSaveEnabled(false);
@@ -468,13 +517,19 @@
           if (!valid) {
             setOutput('config-output', 'Save blocked: fix config validation errors first.');
             return;
-           }
-           try {
-             const res = await fetch(ADMIN_ROOT + '/config', {
-               method: 'PUT',
-               headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'text/yaml' },
-               body: yaml,
-             });
+          }
+          try {
+            if (UI_DEBUG) {
+              const prev = await apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true);
+              if (typeof prev === 'string') {
+                console.log('[config diff]', diffText(prev, yaml));
+              }
+            }
+            const res = await fetch(ADMIN_ROOT + '/config', {
+              method: 'PUT',
+              headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'text/yaml' },
+              body: yaml,
+            });
              if (res.status === 401) {
                handleUnauthorized();
                throw new Error('Unauthorized (401)');
@@ -485,6 +540,7 @@
              } catch {
                setOutput('config-output', text);
              }
+             clearDirty('config');
            } catch (e) {
              setOutput('config-output', String(e.message || e));
            }
@@ -538,14 +594,15 @@
              if (el('kr-expires-at-path')) el('kr-expires-at-path').value = d.expires_at_path == null ? '' : String(d.expires_at_path);
              if (el('kr-refresh-skew')) el('kr-refresh-skew').value = String(Number(d.refresh_skew_seconds || 0));
              if (el('kr-retry-on-401')) el('kr-retry-on-401').checked = !!d.retry_once_on_401;
-             if (el('kr-proxy-expiry')) el('kr-proxy-expiry').value = d.proxy_expiry_seconds == null ? 'null' : String(d.proxy_expiry_seconds);
-             if (el('kr-issuer-expiry')) el('kr-issuer-expiry').value = d.issuer_expiry_seconds == null ? 'null' : String(d.issuer_expiry_seconds);
-             if (el('kr-admin-expiry')) el('kr-admin-expiry').value = d.admin_expiry_seconds == null ? 'null' : String(d.admin_expiry_seconds);
-             setOutput('kr-output', 'Outbound auth configuration loaded.');
-           } catch (e) {
-             setOutput('kr-output', String(e.message || e));
-           }
-         }
+            if (el('kr-proxy-expiry')) el('kr-proxy-expiry').value = d.proxy_expiry_seconds == null ? '' : String(d.proxy_expiry_seconds);
+            if (el('kr-issuer-expiry')) el('kr-issuer-expiry').value = d.issuer_expiry_seconds == null ? '' : String(d.issuer_expiry_seconds);
+            if (el('kr-admin-expiry')) el('kr-admin-expiry').value = d.admin_expiry_seconds == null ? '' : String(d.admin_expiry_seconds);
+            setOutput('kr-output', 'Outbound auth configuration loaded.');
+            clearDirty('outbound-auth');
+          } catch (e) {
+            setOutput('kr-output', String(e.message || e));
+          }
+        }
          async function keyRotationSave() {
            try {
              const outboundAuthEnabled = !!el('outbound-auth-enabled')?.checked;
@@ -561,11 +618,12 @@
                if (!staticHeaderKey || !staticHeaderValue) {
                  throw new Error('Static header key and secret value are required.');
                }
-               await apiCall(ADMIN_ROOT + '/headers/' + encodeURIComponent(staticHeaderKey), 'PUT', { value: staticHeaderValue });
-               setOutput('kr-output', 'Saved static outbound auth header: ' + staticHeaderKey);
-               await headersList();
-               return;
-             }
+              await apiCall(ADMIN_ROOT + '/headers/' + encodeURIComponent(staticHeaderKey), 'PUT', { value: staticHeaderValue });
+              setOutput('kr-output', 'Saved static outbound auth header: ' + staticHeaderKey);
+              await headersList();
+              clearDirty('outbound-auth');
+              return;
+            }
              const payload = {
                enabled: outboundAuthEnabled,
                strategy: (el('kr-strategy')?.value || 'json_ttl'),
@@ -577,12 +635,13 @@
                refresh_skew_seconds: Number(el('kr-refresh-skew')?.value || 0),
                retry_once_on_401: !!el('kr-retry-on-401')?.checked,
              };
-             const out = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'PUT', payload);
-             setOutput('kr-output', out);
-           } catch (e) {
-             setOutput('kr-output', String(e.message || e));
-           }
-         }
+            const out = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'PUT', payload);
+            setOutput('kr-output', out);
+            clearDirty('outbound-auth');
+          } catch (e) {
+            setOutput('kr-output', String(e.message || e));
+          }
+        }
         async function inboundAuthSave() {
           try {
             const current = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'GET');
@@ -606,9 +665,24 @@
             const out = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'PUT', payload);
             setOutput('keys-output', out);
             await keysRefresh();
+            clearDirty('inbound-auth');
           } catch (e) {
             setOutput('keys-output', String(e.message || e));
           }
+        }
+        function diffText(prevText, nextText) {
+          const a = String(prevText || '').split('\n');
+          const b = String(nextText || '').split('\n');
+          const max = Math.max(a.length, b.length);
+          const lines = [];
+          for (let i = 0; i < max; i += 1) {
+            const left = a[i];
+            const right = b[i];
+            if (left === right) continue;
+            if (left !== undefined) lines.push('- ' + left);
+            if (right !== undefined) lines.push('+ ' + right);
+          }
+          return lines.join('\n') || '(no changes)';
         }
         async function adminAuthSave() {
           try {
@@ -633,6 +707,7 @@
             const out = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'PUT', payload);
             setOutput('admin-keys-output', out);
             await keysRefresh();
+            clearDirty('admin-auth');
           } catch (e) {
             setOutput('admin-keys-output', String(e.message || e));
           }
@@ -669,20 +744,57 @@
           const headers = normalizeRuleHeadersForUi(rule || {});
           return { ...rule, headers };
         }
+        function hasHeaderRowErrors(headers) {
+          return (headers || []).some((h) => !String(h?.name || '').trim() || !String(h?.value || '').trim());
+        }
         function renderHeaderRows(kind, ruleIndex, headers) {
           const safeHeaders = Array.isArray(headers) ? headers : [];
           if (!safeHeaders.length) {
             return '<div style="color:#64748b;margin:6px 0;">(no header matches)</div>';
           }
-          return safeHeaders.map((h, j) => {
+          return '<table style="width:100%;border-collapse:collapse;">'
+            + '<thead><tr>'
+            + '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e2e8f0;">Header Name</th>'
+            + '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e2e8f0;">Header Value</th>'
+            + '<th style="width:1%;padding:6px 8px;border-bottom:1px solid #e2e8f0;"></th>'
+            + '</tr></thead><tbody>'
+            + safeHeaders.map((h, j) => {
             const name = htmlEscape(h?.name || '');
             const value = htmlEscape(h?.value || '');
-            return '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0;">'
-              + '<input data-kind="' + kind + '" data-field="headerName" data-index="' + ruleIndex + '" data-header-index="' + j + '" value="' + name + '" placeholder="Header Name" style="width:100%;max-width:240px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
-              + '<input data-kind="' + kind + '" data-field="headerValue" data-index="' + ruleIndex + '" data-header-index="' + j + '" value="' + value + '" placeholder="Header Value" style="width:100%;max-width:320px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
-              + '<button type="button" class="rule-header-remove-btn" data-kind="' + kind + '" data-index="' + ruleIndex + '" data-header-index="' + j + '">Remove header match rule</button>'
-              + '</div>';
-          }).join('');
+            return '<tr>'
+              + '<td style="padding:6px 8px;">'
+              + '<input data-kind="' + kind + '" data-field="headerName" data-index="' + ruleIndex + '" data-header-index="' + j + '" value="' + name + '" placeholder="Header Name" style="width:100%;max-width:260px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
+              + '</td>'
+              + '<td style="padding:6px 8px;">'
+              + '<input data-kind="' + kind + '" data-field="headerValue" data-index="' + ruleIndex + '" data-header-index="' + j + '" value="' + value + '" placeholder="Header Value" style="width:100%;max-width:360px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
+              + '</td>'
+              + '<td style="padding:6px 8px;text-align:right;">'
+              + '<a href="#" class="rule-header-remove-btn" data-kind="' + kind + '" data-index="' + ruleIndex + '" data-header-index="' + j + '">Remove</a>'
+              + '</td>'
+              + '</tr>';
+          }).join('')
+          + '</tbody></table>';
+        }
+        function validateHttpMethodList(raw) {
+          const list = parseCsvList(raw);
+          if (!list.length) return { ok: false, message: 'At least one HTTP method is required.' };
+          for (const item of list) {
+            if (!/^[A-Za-z]+$/.test(item)) return { ok: false, message: 'Methods must be letters only (comma-separated).' };
+          }
+          return { ok: true, value: list.map((m) => m.toUpperCase()) };
+        }
+        function validateStatusList(raw) {
+          const list = parseCsvList(raw);
+          if (!list.length) return { ok: false, message: 'At least one status code or class is required.' };
+          for (const item of list) {
+            if (/^\d+$/.test(item)) {
+              const n = Number(item);
+              if (!Number.isInteger(n) || n < 100 || n > 999) return { ok: false, message: 'HTTP codes must be between 100 and 999.' };
+              continue;
+            }
+            if (!/^[1-5]xx$/i.test(item)) return { ok: false, message: 'Classes must be like 2xx, 4xx, 5xx.' };
+          }
+          return { ok: true, value: list };
         }
         function renderTransformRules(kind) {
           const listId = kind === 'outbound' ? 'outbound-rules-list' : 'inbound-rules-list';
@@ -703,6 +815,7 @@
             const methodTarget = 'rule-' + kind + '-' + i + '-method';
             const statusTarget = 'rule-' + kind + '-' + i + '-status';
             const headersTarget = 'rule-' + kind + '-' + i + '-headers';
+            const disableHeaderAdd = hasHeaderRowErrors(headers);
             return '<div style="border:1px solid #e2e8f0;border-radius:8px;padding:10px;">'
               + '<label style="display:block;margin:0 0 4px;">Name</label>'
               + '<input data-kind="' + kind + '" data-field="name" data-index="' + i + '" value="' + htmlEscape(rule.name || '') + '" style="width:100%;max-width:460px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
@@ -713,6 +826,8 @@
               + '<div id="' + methodTarget + '" style="display:' + (methodEnabled ? 'block' : 'none') + ';">'
               + '<label style="display:block;margin:6px 0 4px;">Method list (comma-separated)</label>'
               + '<input data-kind="' + kind + '" data-field="method" data-index="' + i + '" value="' + htmlEscape(method) + '" style="width:100%;max-width:460px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
+              + '<div style="font-size:12px;color:#64748b;margin-top:4px;">e.g. GET, POST, DEL</div>'
+              + '<div data-kind="' + kind + '" data-error="method" data-index="' + i + '" style="display:none;font-size:12px;color:#b91c1c;margin-top:4px;"></div>'
               + '</div>'
               + (kind === 'inbound'
                 ? ('<label style="display:flex;gap:8px;align-items:center;margin:10px 0 6px;">'
@@ -723,6 +838,7 @@
                   + '<label style="display:block;margin:6px 0 4px;">Response code list (comma-separated)</label>'
                   + '<input data-kind="' + kind + '" data-field="status" data-index="' + i + '" value="' + htmlEscape(status) + '" style="width:100%;max-width:460px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
                   + '<div style="font-size:12px;color:#64748b;margin-top:4px;">Accepts mixed list of explicit http codes and classes "200, 301, 4xx, 5xx"</div>'
+                  + '<div data-kind="' + kind + '" data-error="status" data-index="' + i + '" style="display:none;font-size:12px;color:#b91c1c;margin-top:4px;"></div>'
                   + '</div>')
                 : '')
               + '<label style="display:flex;gap:8px;align-items:center;margin:10px 0 6px;">'
@@ -732,11 +848,11 @@
               + '<div id="' + headersTarget + '" style="display:' + (headersEnabled ? 'block' : 'none') + ';">'
               + '<div style="margin:6px 0 4px;">List of headers</div>'
               + renderHeaderRows(kind, i, headers)
-              + '<button type="button" class="rule-header-add-btn" data-kind="' + kind + '" data-index="' + i + '">Add header match rule</button>'
+              + '<div style="margin-top:8px;"><button type="button" class="rule-header-add-btn" data-kind="' + kind + '" data-index="' + i + '"' + (disableHeaderAdd ? ' disabled style="opacity:0.5;cursor:not-allowed;"' : '') + '>Add header match rule</button></div>'
               + '</div>'
               + '<label style="display:block;margin:8px 0 4px;">JSONata Expression</label>'
               + '<textarea data-kind="' + kind + '" data-field="expr" data-index="' + i + '" rows="4" style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">' + htmlEscape(rule.expr || '') + '</textarea>'
-              + '<div style="margin-top:8px;"><button type="button" class="rule-remove-btn" data-kind="' + kind + '" data-index="' + i + '">Remove rule</button></div>'
+              + '<div style="margin-top:8px;"><a href="#" class="rule-remove-btn" data-kind="' + kind + '" data-index="' + i + '">Remove rule</a></div>'
               + '</div>';
           }).join('');
         }
@@ -770,7 +886,12 @@
             }
             if (kind === 'outbound') {
               const methodEnabled = !!getToggle('rule-' + kind + '-' + i + '-method')?.checked;
-              const methodList = methodEnabled ? parseCsvList(get('method')?.value || '') : [];
+              const methodRaw = get('method')?.value || '';
+              const methodCheck = methodEnabled ? validateHttpMethodList(methodRaw) : { ok: true, value: [] };
+              if (methodEnabled && !methodCheck.ok) {
+                throw new Error(methodCheck.message);
+              }
+              const methodList = methodEnabled ? methodCheck.value : [];
               next.push({
                 name,
                 ...(methodEnabled && methodList.length ? { method: methodList } : {}),
@@ -779,7 +900,12 @@
               });
             } else {
               const statusEnabled = !!getToggle('rule-' + kind + '-' + i + '-status')?.checked;
-              const statusList = statusEnabled ? parseCsvList(get('status')?.value || '') : [];
+              const statusRaw = get('status')?.value || '';
+              const statusCheck = statusEnabled ? validateStatusList(statusRaw) : { ok: true, value: [] };
+              if (statusEnabled && !statusCheck.ok) {
+                throw new Error(statusCheck.message);
+              }
+              const statusList = statusEnabled ? statusCheck.value : [];
               next.push({
                 name,
                 ...(statusEnabled && statusList.length ? { status: statusList } : {}),
@@ -805,15 +931,17 @@
              if (el('inbound-fallback')) el('inbound-fallback').value = String(inbound.fallback || 'passthrough');
             outboundRuleDrafts = Array.isArray(outbound.rules) ? outbound.rules.map(normalizeRuleForUi) : [];
             inboundRuleDrafts = Array.isArray(inbound.rules) ? inbound.rules.map(normalizeRuleForUi) : [];
-             renderTransformRules('outbound');
-             renderTransformRules('inbound');
-             setOutput('headers-output', 'Outbound transformations loaded.');
-             setOutput('inbound-transform-output', 'Inbound transformations loaded.');
-           } catch (e) {
-             setOutput('headers-output', String(e.message || e));
-             setOutput('inbound-transform-output', String(e.message || e));
-           }
-         }
+            renderTransformRules('outbound');
+            renderTransformRules('inbound');
+            setOutput('headers-output', 'Outbound transformations loaded.');
+            setOutput('inbound-transform-output', 'Inbound transformations loaded.');
+            clearDirty('outbound-transform');
+            clearDirty('inbound-transform');
+          } catch (e) {
+            setOutput('headers-output', String(e.message || e));
+            setOutput('inbound-transform-output', String(e.message || e));
+          }
+        }
         async function saveTransformConfig(kind) {
            try {
              const globalEnabled = !!(el('transform-global-enabled-outbound')?.checked || el('transform-global-enabled-inbound')?.checked);
@@ -834,13 +962,15 @@
                  rules: inboundRules,
                },
              };
-             const out = await apiCall(ADMIN_ROOT + '/transform-config', 'PUT', payload);
-             if (kind === 'outbound') setOutput('headers-output', out);
-             else setOutput('inbound-transform-output', out);
-             await transformConfigLoad();
-           } catch (e) {
-             if (kind === 'outbound') setOutput('headers-output', String(e.message || e));
-             else setOutput('inbound-transform-output', String(e.message || e));
+            const out = await apiCall(ADMIN_ROOT + '/transform-config', 'PUT', payload);
+            if (kind === 'outbound') setOutput('headers-output', out);
+            else setOutput('inbound-transform-output', out);
+            await transformConfigLoad();
+            clearDirty(kind === 'outbound' ? 'outbound-transform' : 'inbound-transform');
+          } catch (e) {
+            if (kind === 'outbound') setOutput('headers-output', String(e.message || e));
+            else setOutput('inbound-transform-output', String(e.message || e));
+          }
         }
         function addHeaderMatchRule(kind, ruleIndex) {
           const rules = kind === 'outbound' ? outboundRuleDrafts : inboundRuleDrafts;
@@ -857,8 +987,7 @@
           rule.headers.splice(headerIndex, 1);
           renderTransformRules(kind);
         }
-         }
-         function sandboxPathToSuffix(path) {
+        function sandboxPathToSuffix(path) {
            if (path === SANDBOX_API_PREFIX) return '';
            if (path.startsWith(SANDBOX_API_PREFIX + '/')) return path.slice((SANDBOX_API_PREFIX + '/').length);
            return null;
@@ -1085,38 +1214,88 @@
            sandboxSyncUrlFromSelection();
            sandboxPreviewRequest();
          }
-         async function headersList() {
-           try {
-             const payload = await apiCall(ADMIN_ROOT + '/headers', 'GET');
-             const names = Array.isArray(payload?.enriched_headers) ? payload.enriched_headers : [];
-             if (!names.length) {
-               setHtml('headers-list', '<div>(none)</div>');
-             } else {
-               const rows = names.map((name) =>
-                 '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #eee;">'
-                 + '<span>' + name + '</span>'
-                 + '<button type="button" class="delete-header-btn" data-name="' + name + '">Delete</button>'
-                 + '</div>'
-               );
-               setHtml('headers-list', rows.join(''));
-             }
-             setOutput('headers-output', 'Enrichments loaded.');
-           } catch (e) {
-             setOutput('headers-output', String(e.message || e));
-           }
-         }
-         async function headersSave() {
-           const name = (el('header-name')?.value || '').trim();
-           const value = el('header-value')?.value || '';
-           try {
-             await apiCall(ADMIN_ROOT + '/headers/' + encodeURIComponent(name), 'PUT', { value });
-             if (el('header-name')) el('header-name').value = '';
-             if (el('header-value')) el('header-value').value = '';
-             setOutput('headers-output', 'Enrichment added.');
-             await headersList();
-           }
-           catch (e) { setOutput('headers-output', String(e.message || e)); }
-         }
+        async function headersList() {
+          try {
+            const payload = await apiCall(ADMIN_ROOT + '/headers', 'GET');
+            const names = Array.isArray(payload?.enriched_headers) ? payload.enriched_headers : [];
+            if (!names.length) {
+              setHtml('headers-list', '<div>(none)</div>');
+            } else {
+              const rows = names.map((name) =>
+                '<tr>'
+                + '<td style="padding:6px 8px;border-bottom:1px solid #eee;">' + name + '</td>'
+                + '<td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right;">'
+                + '<a href="#" class="delete-header-btn" data-name="' + name + '">Delete</a>'
+                + '</td>'
+                + '</tr>'
+              );
+              setHtml('headers-list',
+                '<table style="width:100%;border-collapse:collapse;">'
+                + '<thead><tr><th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e2e8f0;">Header</th><th style="width:1%;padding:6px 8px;border-bottom:1px solid #e2e8f0;"></th></tr></thead>'
+                + '<tbody>' + rows.join('') + '</tbody></table>'
+              );
+            }
+            setOutput('headers-output', 'Enrichments loaded.');
+          } catch (e) {
+            setOutput('headers-output', String(e.message || e));
+          }
+        }
+        function addHeaderInputRow(name, value) {
+          const body = el('headers-input-body');
+          if (!body) return;
+          const idx = body.children.length;
+          const row = document.createElement('tr');
+          row.innerHTML = ''
+            + '<td style="padding:6px 8px;">'
+            + '<input data-header-input="name" data-index="' + idx + '" value="' + htmlEscape(name || '') + '" placeholder="Header Key" style="width:100%;max-width:260px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
+            + '</td>'
+            + '<td style="padding:6px 8px;">'
+            + '<input data-header-input="value" data-index="' + idx + '" value="' + htmlEscape(value || '') + '" placeholder="Header Value" style="width:100%;max-width:360px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
+            + '</td>'
+            + '<td style="padding:6px 8px;text-align:right;">'
+            + '<a href="#" class="remove-header-input" data-index="' + idx + '">Remove</a>'
+            + '</td>';
+          body.appendChild(row);
+          updateHeaderInputAddButton();
+        }
+        function updateHeaderInputAddButton() {
+          const body = el('headers-input-body');
+          const btn = el('headers-add-row-btn');
+          if (!body || !btn) return;
+          let hasEmpty = false;
+          body.querySelectorAll('tr').forEach((row) => {
+            const name = String(row.querySelector('[data-header-input="name"]')?.value || '').trim();
+            const value = String(row.querySelector('[data-header-input="value"]')?.value || '').trim();
+            if (!name || !value) hasEmpty = true;
+          });
+          btn.disabled = hasEmpty;
+          btn.style.opacity = hasEmpty ? '0.5' : '1';
+          btn.style.cursor = hasEmpty ? 'not-allowed' : 'pointer';
+        }
+        async function headersSave() {
+          try {
+            const body = el('headers-input-body');
+            if (!body) return;
+            const rows = Array.from(body.querySelectorAll('tr'));
+            if (!rows.length) {
+              setOutput('headers-output', 'Add at least one header row.');
+              return;
+            }
+            for (const row of rows) {
+              const name = String(row.querySelector('[data-header-input="name"]')?.value || '').trim();
+              const value = String(row.querySelector('[data-header-input="value"]')?.value || '').trim();
+              if (!name || !value) {
+                throw new Error('All header rows must include a key and value.');
+              }
+              await apiCall(ADMIN_ROOT + '/headers/' + encodeURIComponent(name), 'PUT', { value });
+            }
+            body.innerHTML = '';
+            addHeaderInputRow('', '');
+            setOutput('headers-output', 'Enrichments updated.');
+            await headersList();
+          }
+          catch (e) { setOutput('headers-output', String(e.message || e)); }
+        }
          async function headersDeleteConfirmed() {
            const name = String(pendingDeleteHeaderName || '').trim();
            if (!name) return;
@@ -1146,14 +1325,6 @@
              pendingDeleteHeaderName = '';
            }
          }
-         function toggleHeaderValueVisibility() {
-           const field = el('header-value');
-           const btn = el('header-value-toggle-btn');
-           if (!field || !btn) return;
-           const hidden = field.type === 'password';
-           field.type = hidden ? 'text' : 'password';
-           btn.textContent = hidden ? 'hide' : 'show';
-         }
         async function keysRefresh() {
            try {
              const payload = await apiCall(ADMIN_ROOT + '/keys', 'GET');
@@ -1171,21 +1342,21 @@
                + '<div>Primary created: ' + formatCreatedAt(proxy.proxy_primary_key_created_at) + '</div>'
                + '<div>Secondary overlap key: ' + (proxy.secondary_active ? 'active' : 'inactive') + '</div>'
                + '<div>Secondary created: ' + formatCreatedAt(proxy.proxy_secondary_key_created_at) + '</div>'
-               + '<div>Expiry policy: ' + (proxy.expiry_seconds === null ? 'null (long-lived)' : String(proxy.expiry_seconds) + 's') + '</div>'
+              + '<div>Expiry policy: ' + (proxy.expiry_seconds === null ? 'n/a' : String(proxy.expiry_seconds) + 's') + '</div>'
                + '<hr style="margin:10px 0;border:none;border-top:1px solid #eee;" />'
                + '<div><b>Target auth key</b></div>'
                + '<div>Primary: ' + (issuer.primary_active ? 'active' : 'missing') + '</div>'
                + '<div>Primary created: ' + formatCreatedAt(issuer.issuer_primary_key_created_at) + '</div>'
                + '<div>Secondary overlap key: ' + (issuer.secondary_active ? 'active' : 'inactive') + '</div>'
                + '<div>Secondary created: ' + formatCreatedAt(issuer.issuer_secondary_key_created_at) + '</div>'
-               + '<div>Expiry policy: ' + (issuer.expiry_seconds === null ? 'null (long-lived)' : String(issuer.expiry_seconds) + 's') + '</div>';
+              + '<div>Expiry policy: ' + (issuer.expiry_seconds === null ? 'n/a' : String(issuer.expiry_seconds) + 's') + '</div>';
             const adminHtml =
               '<div><b>Admin key</b></div>'
                + '<div>Primary: ' + (admin.primary_active ? 'active' : 'missing') + '</div>'
                + '<div>Primary created: ' + formatCreatedAt(admin.admin_primary_key_created_at) + '</div>'
                + '<div>Secondary overlap key: ' + (admin.secondary_active ? 'active' : 'inactive') + '</div>'
                + '<div>Secondary created: ' + formatCreatedAt(admin.admin_secondary_key_created_at) + '</div>'
-               + '<div>Expiry policy: ' + (admin.expiry_seconds === null ? 'null (long-lived)' : String(admin.expiry_seconds) + 's') + '</div>';
+              + '<div>Expiry policy: ' + (admin.expiry_seconds === null ? 'n/a' : String(admin.expiry_seconds) + 's') + '</div>';
              if (el('keys-status-inbound')) setHtml('keys-status-inbound', inboundHtml);
              if (el('keys-status-admin')) setHtml('keys-status-admin', adminHtml);
            } catch (e) {
@@ -1222,6 +1393,11 @@
         function bind() {
           attachTabs();
           updateProxyHeader('');
+          document.querySelectorAll('.tab-panel').forEach((panel) => {
+            const name = panel.id.replace('tab-', '');
+            panel.addEventListener('input', () => markDirty(name));
+            panel.addEventListener('change', () => markDirty(name));
+          });
           el('login-btn')?.addEventListener('click', async () => {
              const adminKey = readKeyInput();
              if (!adminKey) {
@@ -1245,7 +1421,7 @@
                try { sessionStorage.setItem(ADMIN_ACCESS_TOKEN_STORAGE, token); } catch {}
                setCurrentKey(token);
                showWarning('');
-               try {
+              try {
                 await refreshOverview();
                 await debugLoadTrace();
                 await loadLoggingStatus();
@@ -1254,6 +1430,7 @@
                 await transformConfigLoad();
                 await headersList();
                 await keysRefresh();
+                addHeaderInputRow('', '');
               } catch {
                 // no-op
               }
@@ -1262,10 +1439,30 @@
              }
            });
            el('overview-refresh-btn')?.addEventListener('click', refreshOverview);
-           el('debug-refresh-trace-link')?.addEventListener('click', (evt) => {
-             evt.preventDefault();
-             debugLoadTrace();
-           });
+          el('debug-refresh-trace-link')?.addEventListener('click', (evt) => {
+            evt.preventDefault();
+            debugLoadTrace();
+          });
+          el('logging-ttl-refresh-link')?.addEventListener('click', (evt) => {
+            evt.preventDefault();
+            loadLoggingStatus();
+          });
+          el('logging-status')?.addEventListener('click', (evt) => {
+            const link = evt.target;
+            if (!link || !link.id) return;
+            if (link.id === 'logging-enable-link') {
+              evt.preventDefault();
+              debugEnable();
+            }
+            if (link.id === 'logging-disable-link') {
+              evt.preventDefault();
+              debugDisable();
+            }
+          });
+          el('logging-config-enabled')?.addEventListener('change', () => {
+            const enabled = !!el('logging-config-enabled')?.checked;
+            if (el('logging-config-fields')) el('logging-config-fields').style.display = enabled ? 'block' : 'none';
+          });
            el('logging-open-config-link')?.addEventListener('click', (evt) => {
              evt.preventDefault();
              openConfigTab();
@@ -1278,10 +1475,8 @@
              evt.preventDefault();
              openConfigTab();
            });
-           el('debug-enable-btn')?.addEventListener('click', debugEnable);
-           el('debug-disable-btn')?.addEventListener('click', debugDisable);
-           el('logging-secret-save-btn')?.addEventListener('click', loggingSecretSave);
-           el('logging-secret-delete-btn')?.addEventListener('click', loggingSecretDelete);
+          el('footer-save-logging')?.addEventListener('click', loggingSecretSave);
+          el('logging-secret-delete-btn')?.addEventListener('click', loggingSecretDelete);
            el('config-reload-link')?.addEventListener('click', (evt) => {
              evt.preventDefault();
              configLoad();
@@ -1290,9 +1485,8 @@
              evt.preventDefault();
              configTestRule();
            });
-           el('config-save-btn')?.addEventListener('click', configSave);
-           el('kr-save-btn')?.addEventListener('click', keyRotationSave);
-           el('kr-save-btn-bottom')?.addEventListener('click', keyRotationSave);
+          el('footer-save-config')?.addEventListener('click', configSave);
+          el('footer-save-outbound-auth')?.addEventListener('click', keyRotationSave);
            el('outbound-auth-enabled')?.addEventListener('change', () => {
              setOutboundAuthEnabled(!!el('outbound-auth-enabled')?.checked);
            });
@@ -1308,19 +1502,29 @@
           el('proxy-name')?.addEventListener('input', () => {
             updateProxyHeader(el('proxy-name')?.value || '');
             setConfigSaveEnabled(false);
+            markDirty('config');
           });
           el('proxy-name')?.addEventListener('blur', () => configValidate(true));
            el('headers-save-btn')?.addEventListener('click', headersSave);
-           el('header-value-toggle-btn')?.addEventListener('click', (evt) => {
+           el('headers-add-row-btn')?.addEventListener('click', (evt) => {
              evt.preventDefault();
-             toggleHeaderValueVisibility();
+             addHeaderInputRow('', '');
            });
-           el('headers-list')?.addEventListener('click', (evt) => {
-             const target = evt.target?.closest ? evt.target.closest('.delete-header-btn') : null;
-             if (!target) return;
-             const name = target.getAttribute('data-name') || '';
-             promptDeleteHeader(name);
+           el('headers-input-body')?.addEventListener('input', updateHeaderInputAddButton);
+           el('headers-input-body')?.addEventListener('click', (evt) => {
+             const link = evt.target?.closest ? evt.target.closest('.remove-header-input') : null;
+             if (!link) return;
+             evt.preventDefault();
+             link.closest('tr')?.remove();
+             updateHeaderInputAddButton();
            });
+          el('headers-list')?.addEventListener('click', (evt) => {
+            const target = evt.target?.closest ? evt.target.closest('.delete-header-btn') : null;
+            if (!target) return;
+            evt.preventDefault();
+            const name = target.getAttribute('data-name') || '';
+            promptDeleteHeader(name);
+          });
            el('outbound-add-rule-btn')?.addEventListener('click', () => {
              outboundRuleDrafts.push(emptyOutboundRule());
              renderTransformRules('outbound');
@@ -1332,6 +1536,7 @@
           function handleRuleListClick(kind, evt) {
             const removeRuleBtn = evt.target?.closest ? evt.target.closest('.rule-remove-btn') : null;
             if (removeRuleBtn && removeRuleBtn.getAttribute('data-kind') === kind) {
+              evt.preventDefault();
               const idx = Number(removeRuleBtn.getAttribute('data-index') || -1);
               if (idx >= 0) {
                 if (kind === 'outbound') outboundRuleDrafts.splice(idx, 1);
@@ -1342,12 +1547,14 @@
             }
             const addHeaderBtn = evt.target?.closest ? evt.target.closest('.rule-header-add-btn') : null;
             if (addHeaderBtn && addHeaderBtn.getAttribute('data-kind') === kind) {
+              evt.preventDefault();
               const idx = Number(addHeaderBtn.getAttribute('data-index') || -1);
               if (idx >= 0) addHeaderMatchRule(kind, idx);
               return;
             }
             const removeHeaderBtn = evt.target?.closest ? evt.target.closest('.rule-header-remove-btn') : null;
             if (removeHeaderBtn && removeHeaderBtn.getAttribute('data-kind') === kind) {
+              evt.preventDefault();
               const idx = Number(removeHeaderBtn.getAttribute('data-index') || -1);
               const hIdx = Number(removeHeaderBtn.getAttribute('data-header-index') || -1);
               if (idx >= 0 && hIdx >= 0) removeHeaderMatchRule(kind, idx, hIdx);
@@ -1365,8 +1572,61 @@
           }
           el('outbound-rules-list')?.addEventListener('change', handleRuleToggle);
           el('inbound-rules-list')?.addEventListener('change', handleRuleToggle);
-           el('outbound-transform-save-btn')?.addEventListener('click', () => saveTransformConfig('outbound'));
-           el('inbound-transform-save-btn')?.addEventListener('click', () => saveTransformConfig('inbound'));
+          function updateHeaderAddButton(kind, idx) {
+            const node = kind === 'outbound' ? el('outbound-rules-list') : el('inbound-rules-list');
+            if (!node) return;
+            const headerEnabled = node.querySelector('.rule-match-toggle[data-kind="' + kind + '"][data-index="' + idx + '"][data-target="rule-' + kind + '-' + idx + '-headers"]')?.checked;
+            if (!headerEnabled) return;
+            const headerNodes = node.querySelectorAll('[data-kind="' + kind + '"][data-field="headerName"][data-index="' + idx + '"]');
+            let hasEmpty = false;
+            headerNodes.forEach((input) => {
+              const headerIndex = input.getAttribute('data-header-index');
+              const name = String(input.value || '').trim();
+              const valueInput = node.querySelector('[data-kind="' + kind + '"][data-field="headerValue"][data-index="' + idx + '"][data-header-index="' + headerIndex + '"]');
+              const value = String(valueInput?.value || '').trim();
+              if (!name || !value) hasEmpty = true;
+            });
+            const addBtn = node.querySelector('.rule-header-add-btn[data-kind="' + kind + '"][data-index="' + idx + '"]');
+            if (addBtn) {
+              addBtn.disabled = hasEmpty;
+              addBtn.style.opacity = hasEmpty ? '0.5' : '1';
+              addBtn.style.cursor = hasEmpty ? 'not-allowed' : 'pointer';
+            }
+          }
+          function handleRuleInputValidation(evt) {
+            const target = evt.target;
+            if (!target) return;
+            const kind = target.getAttribute('data-kind');
+            const idx = Number(target.getAttribute('data-index') || -1);
+            if (!kind || idx < 0) return;
+            if (target.getAttribute('data-field') === 'method') {
+              const res = validateHttpMethodList(target.value || '');
+              const msg = (kind && res.ok) ? '' : res.message;
+              const errorNode = document.querySelector('[data-kind="' + kind + '"][data-error="method"][data-index="' + idx + '"]');
+              if (errorNode) {
+                errorNode.textContent = msg || '';
+                errorNode.style.display = msg ? 'block' : 'none';
+              }
+              target.style.borderColor = msg ? '#dc2626' : '#cbd5e1';
+            }
+            if (target.getAttribute('data-field') === 'status') {
+              const res = validateStatusList(target.value || '');
+              const msg = (kind && res.ok) ? '' : res.message;
+              const errorNode = document.querySelector('[data-kind="' + kind + '"][data-error="status"][data-index="' + idx + '"]');
+              if (errorNode) {
+                errorNode.textContent = msg || '';
+                errorNode.style.display = msg ? 'block' : 'none';
+              }
+              target.style.borderColor = msg ? '#dc2626' : '#cbd5e1';
+            }
+            if (target.getAttribute('data-field') === 'headerName' || target.getAttribute('data-field') === 'headerValue') {
+              updateHeaderAddButton(kind, idx);
+            }
+          }
+          el('outbound-rules-list')?.addEventListener('input', handleRuleInputValidation);
+          el('inbound-rules-list')?.addEventListener('input', handleRuleInputValidation);
+           el('footer-save-outbound-transform')?.addEventListener('click', () => saveTransformConfig('outbound'));
+           el('footer-save-inbound-transform')?.addEventListener('click', () => saveTransformConfig('inbound'));
            el('transform-global-enabled-outbound')?.addEventListener('change', () => {
              const v = !!el('transform-global-enabled-outbound')?.checked;
              if (el('transform-global-enabled-inbound')) el('transform-global-enabled-inbound').checked = v;
@@ -1380,10 +1640,16 @@
              el('delete-header-modal')?.close();
            });
            el('delete-header-confirm-btn')?.addEventListener('click', headersDeleteConfirmed);
-          el('keys-refresh-btn')?.addEventListener('click', keysRefresh);
-          el('admin-keys-refresh-btn')?.addEventListener('click', keysRefresh);
-          el('inbound-save-btn')?.addEventListener('click', inboundAuthSave);
-          el('admin-save-btn')?.addEventListener('click', adminAuthSave);
+          el('keys-refresh-link-inbound')?.addEventListener('click', (evt) => {
+            evt.preventDefault();
+            keysRefresh();
+          });
+          el('keys-refresh-link-admin')?.addEventListener('click', (evt) => {
+            evt.preventDefault();
+            keysRefresh();
+          });
+          el('footer-save-inbound-auth')?.addEventListener('click', inboundAuthSave);
+          el('footer-save-admin-auth')?.addEventListener('click', adminAuthSave);
            el('rotate-proxy-btn')?.addEventListener('click', rotateProxy);
            el('rotate-issuer-btn')?.addEventListener('click', rotateIssuer);
            el('rotate-admin-btn')?.addEventListener('click', rotateAdmin);
@@ -1400,18 +1666,19 @@
            el('sandbox-send-btn')?.addEventListener('click', sandboxSend);
            try {
              const token = sessionStorage.getItem(ADMIN_ACCESS_TOKEN_STORAGE) || '';
-             if (token) {
-               setCurrentKey(token);
-               refreshOverview();
-               debugLoadTrace();
-               loadLoggingStatus();
-               configLoad();
-               keyRotationLoad();
-               transformConfigLoad();
-               headersList();
-               keysRefresh();
-               sandboxInit();
-             }
+            if (token) {
+              setCurrentKey(token);
+              refreshOverview();
+              debugLoadTrace();
+              loadLoggingStatus();
+              configLoad();
+              keyRotationLoad();
+              transformConfigLoad();
+              headersList();
+              keysRefresh();
+              sandboxInit();
+              addHeaderInputRow('', '');
+            }
            } catch {}
          }
          bind();
