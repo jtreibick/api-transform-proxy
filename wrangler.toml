@@ -9,3 +9,7 @@ binding = "CONFIG"
 
 [vars]
 BUILD_TIMESTAMP = "dev"
+
+[[rules]]
+type = "Text"
+globs = ["src/ui/templates/*.html", "src/ui/templates/*.js"]

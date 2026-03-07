@@ -23,6 +23,7 @@
            <button type="button" class="tab-btn" data-tab="overview">Status</button>
            <div style="margin-top:6px;font-size:12px;color:#64748b;font-weight:700;text-transform:uppercase;">Observability &amp; Testing</div>
            <button type="button" class="tab-btn tab-child" data-tab="debug">Logging</button>
+           <button type="button" class="tab-btn tab-child" data-tab="live-log">Live Log</button>
            <button type="button" class="tab-btn tab-child" data-tab="sandbox">API Sandbox</button>
            <div style="margin-top:6px;font-size:12px;color:#64748b;font-weight:700;text-transform:uppercase;">Admin</div>
            <button type="button" class="tab-btn tab-child" data-tab="admin-auth">Admin Auth</button>
@@ -31,7 +32,7 @@
            <button type="button" class="tab-btn tab-child" data-tab="outbound-transform">Outbound Transformations</button>
            <div style="margin-top:6px;font-size:12px;color:#64748b;font-weight:700;text-transform:uppercase;">Inbound</div>
            <button type="button" class="tab-btn tab-child" data-tab="inbound-auth">Inbound Auth</button>
-           <button type="button" class="tab-btn tab-child" data-tab="inbound-transform">Inbound Transformations</button>
+          <button type="button" class="tab-btn tab-child" data-tab="inbound-transform">Header Filtering</button>
            <button type="button" class="tab-btn" data-tab="config">Config</button>
            <a href="#" id="logout-link" style="margin-top:14px;font-size:14px;color:#0f172a;text-decoration:underline;">Log out</a>
          </div>
@@ -60,9 +61,7 @@
              <p style="margin:10px 0 6px;"><b>Logging Request</b></p>
              <div id="logging-request-form"></div>
              <div id="logging-secret-wrap">
-               <label for="logging-secret" style="display:block;margin:2px 0 4px;">Logging auth secret</label>
-               <input id="logging-secret" type="password" placeholder="set logging auth secret"
-                 style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;" />
+               <div id="logging-secret-template"></div>
                <p style="font-size:13px;color:#475569;margin:4px 0 0 0;">Logging secrets are managed via this API only and are not stored in YAML.</p>
              </div>
            </div>
@@ -70,6 +69,16 @@
           <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
             <button type="button" id="footer-save-logging" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
           </div>
+        </div>
+        <div id="tab-live-log" class="tab-panel" style="display:none;">
+          <p><b>Live Log</b></p>
+          <div id="live-log-status" style="padding:10px 12px;border:1px solid #ddd;border-radius:8px;line-height:1.5;margin:10px 0;">Disconnected.</div>
+          <p style="margin:8px 0 10px;">
+            <a href="#" id="live-log-reconnect-link">Reconnect</a>
+            <span style="padding:0 8px;color:#94a3b8;">|</span>
+            <a href="#" id="live-log-clear-link">Clear</a>
+          </p>
+          <pre id="live-log-output" style="margin-top:0;padding:12px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap;word-break:break-word;max-height:420px;overflow:auto;"></pre>
         </div>
         <div id="tab-config" class="tab-panel" style="display:none;">
            <p><b>YAML config</b></p>
@@ -97,22 +106,6 @@
              <span>Enabled</span>
            </label>
            <div id="outbound-auth-fields">
-           <label for="outbound-mode" style="display:block;margin:8px 0 4px;">Auth mode</label>
-           <select id="outbound-mode" style="width:100%;max-width:420px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;">
-             <option value="static_header">Static header</option>
-             <option value="autorotation">Auto-rotation</option>
-           </select>
-
-           <div id="outbound-static-fields" style="display:none;">
-             <label for="outbound-static-header-key" style="display:block;margin:10px 0 4px;">Static Header Key</label>
-             <input id="outbound-static-header-key" type="text" placeholder="authorization"
-               style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
-             <label for="outbound-static-header-value" style="display:block;margin:10px 0 4px;">Static Header Secret Value</label>
-             <input id="outbound-static-header-value" type="password" placeholder="Bearer ..."
-               style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
-           </div>
-
-           <div id="outbound-auto-fields">
            <label for="kr-enabled" style="display:block;margin:8px 0 4px;">Enabled</label>
            <input id="kr-enabled" type="checkbox" />
 
@@ -151,7 +144,6 @@
            <label for="kr-retry-on-401" style="display:block;margin:10px 0 4px;">Retry Once On 401</label>
            <input id="kr-retry-on-401" type="checkbox" />
            </div>
-           </div>
            <div style="margin-top:10px;"></div>
           <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
             <button type="button" id="footer-save-outbound-auth" style="background:#0f172a;color:#fff;border:1px solid #0f172a;padding:8px 14px;border-radius:8px;">Save</button>
@@ -182,21 +174,9 @@
            </div>
            <hr style="margin:16px 0;border:none;border-top:1px solid #e2e8f0;" />
            <p><b>Enrichments</b></p>
-           <div id="headers-input-table" style="margin-top:8px;">
-             <table style="width:100%;border-collapse:collapse;">
-               <thead>
-                 <tr>
-                   <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e2e8f0;">Header Key</th>
-                   <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e2e8f0;">Header Value</th>
-                   <th style="width:1%;padding:6px 8px;border-bottom:1px solid #e2e8f0;"></th>
-                 </tr>
-               </thead>
-               <tbody id="headers-input-body"></tbody>
-             </table>
-             <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
-               <button type="button" id="headers-add-row-btn">Add header row</button>
-               <button type="button" id="headers-save-btn">Save headers</button>
-             </div>
+           <div id="headers-input-wrap" style="margin-top:8px;"></div>
+           <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+             <button type="button" id="headers-save-btn">Save headers</button>
            </div>
            <div id="headers-list" style="margin-top:10px;padding:12px;border:1px solid #ddd;border-radius:8px;"></div>
           <div style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px;display:flex;justify-content:flex-end;">
@@ -251,10 +231,11 @@
                <label for="jwt-inbound-audience" style="display:block;margin:8px 0 4px;">Audience (optional)</label>
                <input id="jwt-inbound-audience" type="text" placeholder="aud"
                  style="width:100%;max-width:520px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
-               <div id="jwt-inbound-jwks-fields" style="display:none;">
-                 <p style="margin:8px 0 6px;"><b>JWKS Request</b></p>
-                 <div id="jwt-jwks-request-form"></div>
-               </div>
+              <div id="jwt-inbound-jwks-fields" style="display:none;">
+                <p style="margin:8px 0 6px;"><b>JWKS Request</b></p>
+                <div id="jwt-jwks-request-form"></div>
+              </div>
+              <div id="jwt-inbound-secret-template" style="margin-top:12px;"></div>
                <label for="jwt-inbound-skew" style="display:block;margin:8px 0 4px;">Clock skew seconds</label>
                <input id="jwt-inbound-skew" type="text" placeholder="0"
                  style="width:100%;max-width:160px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
@@ -322,15 +303,12 @@
           </div>
         </div>
         <div id="tab-inbound-transform" class="tab-panel" style="display:none;">
-           <p><b>Inbound Transformations</b></p>
+           <p><b>Header Filtering</b></p>
            <label style="display:flex;gap:8px;align-items:center;margin:8px 0 12px;">
              <input id="transform-global-enabled-inbound" type="checkbox" />
              <span>Enable transform rules globally</span>
            </label>
-           <label for="inbound-custom-js" style="display:block;margin:8px 0 4px;">Custom JS Preprocessor</label>
-           <input id="inbound-custom-js" type="text" placeholder="hook name"
-             style="width:100%;max-width:420px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />
-           <label for="inbound-default-expr" style="display:block;margin:8px 0 4px;">Default JSONata Expression</label>
+           <label for="inbound-default-expr" style="display:block;margin:8px 0 4px;">Global JSONata Expression</label>
            <textarea id="inbound-default-expr" rows="4"
              style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"></textarea>
            <label for="inbound-fallback" style="display:block;margin:8px 0 4px;">Fallback</label>
@@ -344,7 +322,7 @@
            <div style="margin-top:8px;">
              <button type="button" id="inbound-add-rule-btn">Add rule</button>
            </div>
-           <label for="inbound-header-filtering-mode" style="display:block;margin:12px 0 4px;">Header filtering</label>
+           <label for="inbound-header-filtering-mode" style="display:block;margin:12px 0 4px;">Filter method</label>
            <select id="inbound-header-filtering-mode" style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;">
              <option value="blacklist">blacklist</option>
              <option value="whitelist">whitelist</option>

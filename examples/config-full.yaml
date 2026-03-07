@@ -1,9 +1,12 @@
-targetHost: null
-proxyName: null
+# Full configuration template (all fields shown, mostly commented)
+
+targetHost: null # string or null. When set, X-Proxy-Host is ignored.
+proxyName: null  # friendly name
+
 http_auth:
   profiles:
     logging:
-      timestamp_format: epoch_ms
+      timestamp_format: epoch_ms # epoch_ms | epoch_seconds | iso_8601
       headers:
         Authorization: "Bearer {{current}}"
     target:
@@ -14,6 +17,7 @@ http_auth:
       timestamp_format: epoch_ms
       headers:
         Authorization: "Bearer {{current}}"
+
 jwt:
   enabled: false
   header: Authorization
@@ -48,21 +52,26 @@ jwt:
           current_token_value: data.apiKey
           current_token_ttl: data.ttl
           current_token_ttl_unit: seconds # seconds | minutes | hours
+
 apiKeyPolicy:
   proxyExpirySeconds: null
   issuerExpirySeconds: null
   adminExpirySeconds: null
+
 targetCredentialRotation:
   enabled: false
-  strategy: json_ttl
+  strategy: json_ttl # json_ttl | oauth_client_credentials
   request:
     method: POST
-    url: ""
+    url: "https://api.example.com/token"
     headers:
       # Header-Name: value
     body:
       type: json
-      value: {}
+      value:
+        client_id: "..."
+        client_secret: "..."
+        grant_type: "client_credentials"
     http_authorization:
       type: static # static | key_rotation
       static:
@@ -74,19 +83,20 @@ targetCredentialRotation:
   response:
     key_path: data.apiKey
     ttl_path: data.ttl
-    ttl_unit: seconds
+    ttl_unit: seconds # seconds | minutes | hours
     expires_at_path: null
   trigger:
     refresh_skew_seconds: 300
     retry_once_on_401: true
+
 debug:
   max_debug_session_seconds: 3600
   loggingEndpoint:
     http_request:
       method: POST
-      url: ""
+      url: "https://logs.example.com/ingest"
       headers:
-        # Header-Name: value
+        Content-Type: application/json
       body:
         type: json
         value: {}
@@ -98,13 +108,47 @@ debug:
           secret_ref: logging_auth_key
         key_rotation:
           profile: logging
+
 transform:
   enabled: true
-  defaultExpr: ""
-  fallback: passthrough
-  rules: []
+  # Legacy (pre-split) transform keys (supported):
+  # defaultExpr: ""
+  # fallback: passthrough
+  # rules: []
+  outbound:
+    enabled: false
+    custom_js_preprocessor: null
+    defaultExpr: ""
+    fallback: passthrough # passthrough | error | transform_default
+    rules:
+      # - name: outbound_rule
+      #   method: [GET, POST]
+      #   path: ["/v1/*"]
+      #   headers:
+      #     - name: x-api-mode
+      #       value: legacy
+      #   expr: |
+      #     { "request": $ }
+  inbound:
+    enabled: true
+    custom_js_preprocessor: null
+    defaultExpr: ""
+    fallback: passthrough
+    header_filtering:
+      mode: blacklist # blacklist | whitelist
+      names: []
+    rules:
+      # - name: errors_json
+      #   status: [4xx, 5xx, 422]
+      #   type: json # json | text | binary | any
+      #   headers:
+      #     - name: x-api-mode
+      #       value: legacy
+      #   expr: |
+      #     { "ok": false, "status": status, "error": body }
+
 header_forwarding:
-  mode: blacklist
+  mode: blacklist # blacklist | whitelist
   names:
     - connection
     - keep-alive

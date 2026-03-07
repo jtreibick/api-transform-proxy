@@ -1,4 +1,22 @@
-import { templates } from "./ui/templates.js";
+import pageTemplate from "./ui/templates/page.html";
+import onboardingHeaderTemplate from "./ui/templates/onboarding_header.html";
+import adminLoginOptionsTemplate from "./ui/templates/admin_login_options.html";
+import adminPageTemplate from "./ui/templates/admin_page.html";
+import initAdminLoginJs from "./ui/templates/init_admin_login.js";
+import secretFieldTemplate from "./ui/templates/secret_field.html";
+import secretFieldJs from "./ui/templates/secret_field.js";
+import adminPageJs from "./ui/templates/admin_page.js";
+
+const templates = {
+  page: pageTemplate,
+  onboarding_header: onboardingHeaderTemplate,
+  admin_login_options: adminLoginOptionsTemplate,
+  admin_page: adminPageTemplate,
+  init_admin_login_js: initAdminLoginJs,
+  secret_field: secretFieldTemplate,
+  secret_field_js: secretFieldJs,
+  admin_page_js: adminPageJs,
+};
 
 export const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72">
   <rect width="72" height="72" rx="16" fill="#0f172a"/>

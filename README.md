@@ -96,9 +96,31 @@ Notes:
 
 ```yaml
 targetHost: api.vendor.com # string or null
+http_auth:
+  profiles:
+    logging:
+      timestamp_format: epoch_ms
+      headers:
+        Authorization: "Bearer {{current}}"
+
+# Auth profile placeholders (values stored in KV under auth/<profile>/...)
+# - {{current}}, {{secondary}}
+# - {{issued_at_ms}}, {{expires_at_ms}}
+# - {{issued_at_iso}}, {{expires_at_iso}}
+# - {{issued_at}}, {{expires_at}} (format controlled by timestamp_format)
 
 debug:
   max_debug_session_seconds: 3600     # default 1 hour, max 604800 (7 days)
+  loggingEndpoint:
+    http_request:
+      auth_profile: logging
+
+# Optional auth profiles for any outbound http_request
+http_auth:
+  profiles:
+    logging:
+      headers:
+        Authorization: "Bearer {{logging_secret}}"
 
 transform:
   enabled: true
@@ -136,6 +158,8 @@ header_forwarding:
     - x-proxy-host
     - xproxyhost
 ```
+
+See [`examples/config-full.yaml`](./examples/config-full.yaml) for a complete, commented template of every available field.
 
 
 

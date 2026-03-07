@@ -3,7 +3,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:templates": "node scripts/build-templates.mjs",
     "deploy:cf": "npm exec wrangler deploy"
   },
   "devDependencies": {

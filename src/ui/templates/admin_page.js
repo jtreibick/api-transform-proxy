@@ -8,6 +8,10 @@
         let inboundRuleDrafts = [];
         let currentTabName = 'overview';
         const dirtyTabs = new Set();
+        let liveLogStreamAbortController = null;
+        let liveLogReconnectTimer = null;
+        let liveLogShouldReconnect = false;
+        const LIVE_LOG_MAX_CHARS = 200000;
          const SANDBOX_TEMPLATES = {
            status_page: { label: 'GET /_apiproxy', method: 'GET', path: '/_apiproxy', auth_mode: 'none', headers: {}, body: null },
            request_passthrough: {
@@ -82,7 +86,14 @@
           }
         })();
 
-         function el(id) { return document.getElementById(id); }
+        function el(id) { return document.getElementById(id); }
+        function bindOnce(id, handler) {
+          const node = el(id);
+          if (!node) return;
+          if (node.dataset.bound === '1') return;
+          node.addEventListener('click', handler);
+          node.dataset.bound = '1';
+        }
          function setOutput(id, data) {
            const node = el(id);
            if (!node) return;
@@ -95,6 +106,66 @@
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;');
         }
+        function renderHeaderList(prefix, options) {
+          const label = options?.label || 'Headers';
+          const helpText = options?.helpText || 'YAML-style: Header-Name: value per line';
+          const disabled = !!options?.disabled;
+          const rows = options?.rows || 4;
+          const placeholder = options?.placeholder || 'Header-Name: value';
+          const value = options?.value || '';
+          return ''
+            + '<div style="display:flex;justify-content:space-between;align-items:center;margin:10px 0 4px;">'
+            + '<label for="' + prefix + '-headers">' + htmlEscape(label) + '</label>'
+            + '<a href="#" id="' + prefix + '-headers-toggle" style="font-size:12px;text-decoration:underline;">hide</a>'
+            + '</div>'
+            + '<div id="' + prefix + '-headers-help" style="font-size:12px;color:#64748b;margin-top:-2px;margin-bottom:4px;">' + htmlEscape(helpText) + '</div>'
+            + '<div id="' + prefix + '-headers-wrap">'
+            + '<textarea id="' + prefix + '-headers" rows="' + rows + '" placeholder="' + htmlEscape(placeholder) + '" ' + (disabled ? 'disabled ' : '')
+            + 'style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;' + (disabled ? 'background:#f8fafc;' : '') + '">' + htmlEscape(value) + '</textarea>'
+            + '</div>';
+        }
+        function renderSecretStorage(prefix, options) {
+          const label = options?.label || 'Secret';
+          const helpText = options?.helpText || '';
+          const placeholder = options?.placeholder || '';
+          const inputId = options?.inputId || (prefix + '-secret');
+          const value = options?.value || '';
+          const tsId = options?.timestampFormatId || '';
+          const tsLabel = options?.timestampFormatLabel || 'Timestamp format';
+          const tsValue = options?.timestampFormatValue || 'epoch_ms';
+          const tsHelp = options?.timestampFormatHelp || '';
+          const buttons = Array.isArray(options?.buttons) ? options.buttons : [];
+          return ''
+            + '<label for="' + inputId + '" style="display:block;margin:10px 0 4px;">' + htmlEscape(label) + '</label>'
+            + '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">'
+            + '<input id="' + inputId + '" type="password" placeholder="' + htmlEscape(placeholder) + '" value="' + htmlEscape(value) + '"'
+            + ' style="width:100%;max-width:620px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
+            + '<a href="#" id="' + prefix + '-secret-toggle" style="font-size:12px;text-decoration:underline;">show</a>'
+            + '</div>'
+            + (helpText ? '<div style="font-size:12px;color:#64748b;margin-top:4px;">' + htmlEscape(helpText) + '</div>' : '')
+            + (tsId
+              ? ('<label for="' + htmlEscape(tsId) + '" style="display:block;margin:10px 0 4px;">' + htmlEscape(tsLabel) + '</label>'
+                + '<select id="' + htmlEscape(tsId) + '" style="width:100%;max-width:260px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;">'
+                + '<option value="epoch_ms"' + (tsValue === 'epoch_ms' ? ' selected' : '') + '>epoch_ms</option>'
+                + '<option value="epoch_seconds"' + (tsValue === 'epoch_seconds' ? ' selected' : '') + '>epoch_seconds</option>'
+                + '<option value="iso_8601"' + (tsValue === 'iso_8601' ? ' selected' : '') + '>iso_8601</option>'
+                + '</select>'
+                + (tsHelp ? '<div style="font-size:12px;color:#64748b;margin-top:4px;">' + htmlEscape(tsHelp) + '</div>' : ''))
+              : '')
+            + (buttons.length
+              ? ('<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">'
+                + buttons.map((btn) => {
+                  const id = btn?.id || '';
+                  const labelText = btn?.label || '';
+                  const kind = btn?.kind || 'secondary';
+                  const style = kind === 'danger'
+                    ? 'background:#fff;border:1px solid #dc2626;color:#dc2626;'
+                    : 'background:#fff;border:1px solid #cbd5e1;color:#0f172a;';
+                  return '<button type="button" id="' + htmlEscape(id) + '" style="' + style + 'padding:6px 10px;border-radius:8px;">' + htmlEscape(labelText) + '</button>';
+                }).join('')
+                + '</div>')
+              : '');
+        }
         function renderRequestForm(prefix, options) {
           const verbs = Array.isArray(options?.verbs) && options.verbs.length
             ? options.verbs
@@ -103,30 +174,179 @@
           const disableUrl = !!options?.disableUrl;
           const disableHeaders = !!options?.disableHeaders;
           const disableBody = !!options?.disableBody;
+          const enableHttpAuthorization = !!options?.enableHttpAuthorization;
+          const authProfileHint = options?.authProfileHint || "";
           const verbOptions = verbs
             .map((verb) => '<option value="' + htmlEscape(String(verb).toUpperCase()) + '">' + htmlEscape(String(verb).toUpperCase()) + '</option>')
             .join('');
           return ''
-            + '<label for="' + prefix + '-verb" style="display:block;margin:8px 0 4px;">Verb</label>'
+            + '<div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">'
+            + '<div style="min-width:110px;max-width:120px;flex:0 0 120px;">'
+            + '<label for="' + prefix + '-verb" style="display:block;margin:8px 0 4px;">Method</label>'
             + '<select id="' + prefix + '-verb" ' + (disableVerb ? 'disabled ' : '')
-            + 'style="width:100%;max-width:220px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;' + (disableVerb ? 'background:#f8fafc;' : '') + '">'
+            + 'style="width:100%;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;' + (disableVerb ? 'background:#f8fafc;' : '') + '">'
             + verbOptions
             + '</select>'
-            + '<label for="' + prefix + '-url" style="display:block;margin:10px 0 4px;">Url</label>'
-            + '<input id="' + prefix + '-url" type="text" placeholder="https://... or /_apiproxy/..." ' + (disableUrl ? 'disabled ' : '')
-            + 'style="width:100%;max-width:760px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;' + (disableUrl ? 'background:#f8fafc;' : '') + '" />'
-            + '<label for="' + prefix + '-headers" style="display:block;margin:10px 0 4px;">Headers</label>'
-            + '<textarea id="' + prefix + '-headers" rows="4" placeholder="Header-Name: value" ' + (disableHeaders ? 'disabled ' : '')
-            + 'style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;' + (disableHeaders ? 'background:#f8fafc;' : '') + '"></textarea>'
-            + '<label for="' + prefix + '-body" style="display:block;margin:10px 0 4px;">Request Body</label>'
+            + '</div>'
+            + '<div style="min-width:220px;flex:1;">'
+            + '<label for="' + prefix + '-url" style="display:block;margin:8px 0 4px;">URL</label>'
+            + '<input id="' + prefix + '-url" type="text" placeholder="https://" ' + (disableUrl ? 'disabled ' : '')
+            + 'style="width:100%;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;' + (disableUrl ? 'background:#f8fafc;' : '') + '" />'
+            + '</div>'
+            + '</div>'
+            + renderHeaderList(prefix, {
+              label: 'Headers',
+              helpText: 'YAML-style: Header-Name: value per line',
+              disabled: disableHeaders,
+              rows: 4,
+              placeholder: 'Header-Name: value',
+            })
+            + '<div style="display:flex;justify-content:space-between;align-items:center;margin:10px 0 4px;">'
+            + '<label for="' + prefix + '-body">Request Body</label>'
+            + '<a href="#" id="' + prefix + '-body-toggle" style="font-size:12px;text-decoration:underline;">hide</a>'
+            + '</div>'
+            + '<div id="' + prefix + '-body-wrap">'
             + '<textarea id="' + prefix + '-body" rows="8" placeholder="JSON or raw text" ' + (disableBody ? 'disabled ' : '')
-            + 'style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;' + (disableBody ? 'background:#f8fafc;' : '') + '"></textarea>';
+            + 'style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;' + (disableBody ? 'background:#f8fafc;' : '') + '"></textarea>'
+            + '</div>'
+            + (enableHttpAuthorization
+              ? ('<div style="margin-top:12px;padding-top:10px;border-top:1px solid #e2e8f0;">'
+                + '<label for="' + prefix + '-auth-type" style="display:block;margin:0 0 4px;">HTTP Authorization</label>'
+                + '<select id="' + prefix + '-auth-type" style="width:100%;max-width:260px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;">'
+                + '<option value="none">none</option>'
+                + '<option value="static">static</option>'
+                + '<option value="key_rotation">key_rotation</option>'
+                + '</select>'
+                + '<div id="' + prefix + '-auth-static-wrap" style="display:none;">'
+                + '<label for="' + prefix + '-auth-header-name" style="display:block;margin:10px 0 4px;">Auth header name</label>'
+                + '<input id="' + prefix + '-auth-header-name" type="text" placeholder="Authorization"'
+                + ' style="width:100%;max-width:360px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
+                + '<label for="' + prefix + '-auth-secret-ref" style="display:block;margin:10px 0 4px;">Auth key reference</label>'
+                + '<input id="' + prefix + '-auth-secret-ref" type="text" placeholder="target_auth_key"'
+                + ' style="width:100%;max-width:360px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
+                + '<label for="' + prefix + '-auth-secret-value" style="display:block;margin:10px 0 4px;">Auth key value (password)</label>'
+                + '<input id="' + prefix + '-auth-secret-value" type="password" placeholder="secret value"'
+                + ' style="width:100%;max-width:420px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
+                + '<div style="font-size:12px;color:#64748b;margin-top:4px;">Stored in KV and referenced as ${auth_key_ref} in YAML header value.</div>'
+                + '</div>'
+                + '<div id="' + prefix + '-auth-key-rotation-wrap" style="display:none;">'
+                + '<label for="' + prefix + '-auth-profile" style="display:block;margin:10px 0 4px;">Key rotation profile</label>'
+                + '<input id="' + prefix + '-auth-profile" type="text" placeholder="logging | target | jwt_inbound"'
+                + ' style="width:100%;max-width:360px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
+                + (authProfileHint ? '<div style="font-size:12px;color:#64748b;margin-top:4px;">' + htmlEscape(authProfileHint) + '</div>' : '')
+                + '</div>'
+                + '</div>')
+              : '');
+        }
+        function setRequestAuthMode(prefix, type) {
+          const mode = String(type || 'none');
+          if (el(prefix + '-auth-type')) el(prefix + '-auth-type').value = mode;
+          if (el(prefix + '-auth-static-wrap')) el(prefix + '-auth-static-wrap').style.display = mode === 'static' ? 'block' : 'none';
+          if (el(prefix + '-auth-key-rotation-wrap')) el(prefix + '-auth-key-rotation-wrap').style.display = mode === 'key_rotation' ? 'block' : 'none';
+        }
+        function bindRequestFormToggles(prefix) {
+          const headersToggle = el(prefix + '-headers-toggle');
+          const headersWrap = el(prefix + '-headers-wrap');
+          const headersHelp = el(prefix + '-headers-help');
+          const bodyToggle = el(prefix + '-body-toggle');
+          const bodyWrap = el(prefix + '-body-wrap');
+          const setState = (toggleEl, wrapEl, helpEl, show) => {
+            if (!toggleEl || !wrapEl) return;
+            wrapEl.style.display = show ? 'block' : 'none';
+            if (helpEl) helpEl.style.display = show ? 'block' : 'none';
+            toggleEl.textContent = show ? 'hide' : 'show';
+          };
+          const bind = (toggleEl, wrapEl, helpEl) => {
+            if (!toggleEl || !wrapEl) return;
+            setState(toggleEl, wrapEl, helpEl, true);
+            toggleEl.addEventListener('click', (evt) => {
+              evt.preventDefault();
+              const show = wrapEl.style.display === 'none';
+              setState(toggleEl, wrapEl, helpEl, show);
+            });
+          };
+          bind(headersToggle, headersWrap, headersHelp);
+          bind(bodyToggle, bodyWrap, null);
+          const authType = el(prefix + '-auth-type');
+          if (authType) {
+            authType.addEventListener('change', () => {
+              setRequestAuthMode(prefix, authType.value || 'none');
+            });
+            setRequestAuthMode(prefix, authType.value || 'none');
+          }
+        }
+        function bindHeaderListToggles(prefix) {
+          const toggle = el(prefix + '-headers-toggle');
+          const wrap = el(prefix + '-headers-wrap');
+          const help = el(prefix + '-headers-help');
+          if (!toggle || !wrap) return;
+          const setState = (show) => {
+            wrap.style.display = show ? 'block' : 'none';
+            if (help) help.style.display = show ? 'block' : 'none';
+            toggle.textContent = show ? 'hide' : 'show';
+          };
+          setState(true);
+          toggle.addEventListener('click', (evt) => {
+            evt.preventDefault();
+            const show = wrap.style.display === 'none';
+            setState(show);
+          });
+        }
+        function bindSecretStorage(prefix, inputId) {
+          const toggle = el(prefix + '-secret-toggle');
+          const input = el(inputId || (prefix + '-secret'));
+          if (!toggle || !input) return;
+          toggle.addEventListener('click', (evt) => {
+            evt.preventDefault();
+            const isHidden = input.type === 'password';
+            input.type = isHidden ? 'text' : 'password';
+            toggle.textContent = isHidden ? 'hide' : 'show';
+          });
+        }
+        async function saveAuthProfileSecret(profile, inputId, outputId) {
+          try {
+            const value = String(el(inputId)?.value || '').trim();
+            if (!value) throw new Error('Secret value is required.');
+            await apiCall(ADMIN_ROOT + '/http-auth/' + encodeURIComponent(profile) + '/secret', 'PUT', { value });
+            if (outputId) setOutput(outputId, 'Secret saved.');
+            else showWarning('Secret saved.');
+          } catch (e) {
+            if (outputId) setOutput(outputId, String(e.message || e));
+            else showWarning(String(e.message || e));
+          }
+        }
+        async function deleteAuthProfileSecret(profile, outputId) {
+          try {
+            await apiCall(ADMIN_ROOT + '/http-auth/' + encodeURIComponent(profile) + '/secret', 'DELETE');
+            if (outputId) setOutput(outputId, 'Secret deleted.');
+            else showWarning('Secret deleted.');
+          } catch (e) {
+            if (outputId) setOutput(outputId, String(e.message || e));
+            else showWarning(String(e.message || e));
+          }
+        }
+        async function persistRequestAuthSecret(prefix) {
+          const authType = String(el(prefix + '-auth-type')?.value || '').trim();
+          if (authType !== 'static') return;
+          const secretRef = String(el(prefix + '-auth-secret-ref')?.value || '').trim();
+          const secretValue = String(el(prefix + '-auth-secret-value')?.value || '');
+          if (!secretRef || !secretValue.trim()) return;
+          await apiCall(ADMIN_ROOT + '/http-secrets/' + encodeURIComponent(secretRef), 'PUT', { value: secretValue });
         }
         function headersObjectToMultiline(obj) {
           if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return '';
           return Object.entries(obj)
             .map(([name, value]) => String(name) + ': ' + String(value ?? ''))
             .join('\n');
+        }
+        function headersArrayToObject(headers) {
+          const out = {};
+          (Array.isArray(headers) ? headers : []).forEach((item) => {
+            const name = String(item?.name || '').trim();
+            const value = String(item?.value || '').trim();
+            if (name && value) out[name] = value;
+          });
+          return out;
         }
         function headersMultilineToObject(text) {
           const out = {};
@@ -176,7 +396,34 @@
             url: String(el(prefix + '-url')?.value || '').trim(),
             headers,
           };
-          if (body.type && body.type !== 'none') req.body = body;
+          req.body_type = body.type || 'none';
+          if (body.type === 'json') req.body = body.value ?? {};
+          else if (body.type === 'raw') req.body = body.raw ?? '';
+          else if (body.type === 'urlencoded') req.body = body.value ?? {};
+          else req.body = {};
+          const authType = String(el(prefix + '-auth-type')?.value || '').trim();
+          if (authType === 'static') {
+            const headerName = String(el(prefix + '-auth-header-name')?.value || '').trim();
+            const secretRef = String(el(prefix + '-auth-secret-ref')?.value || '').trim();
+            const headers = {};
+            if (headerName && secretRef) {
+              headers[headerName] = '${' + secretRef + '}';
+            }
+            req.authorization = {
+              type: 'static',
+              static: {
+                headers,
+                secret_ref: secretRef || null,
+              },
+            };
+          } else if (authType === 'key_rotation') {
+            req.authorization = {
+              type: 'key_rotation',
+              key_rotation: {
+                profile: String(el(prefix + '-auth-profile')?.value || '').trim(),
+              },
+            };
+          }
           return req;
         }
         function setRequestForm(prefix, request) {
@@ -185,7 +432,41 @@
           if (el(prefix + '-verb')) el(prefix + '-verb').value = method;
           if (el(prefix + '-url')) el(prefix + '-url').value = String(req.url || '');
           if (el(prefix + '-headers')) el(prefix + '-headers').value = headersObjectToMultiline(req.headers || {});
-          if (el(prefix + '-body')) el(prefix + '-body').value = requestBodyToText(req.body);
+          const bodyForEditor =
+            req.body_type
+              ? ({
+                  type: String(req.body_type || 'none').toLowerCase(),
+                  value: req.body,
+                  raw: typeof req.body === 'string' ? req.body : undefined,
+                })
+              : req.body;
+          if (el(prefix + '-body')) el(prefix + '-body').value = requestBodyToText(bodyForEditor);
+          const auth =
+            req.authorization && typeof req.authorization === 'object'
+              ? req.authorization
+              : (req.http_authorization && typeof req.http_authorization === 'object' ? req.http_authorization : null);
+          const authType = auth?.type === 'static' || auth?.type === 'key_rotation' ? auth.type : 'none';
+          setRequestAuthMode(prefix, authType);
+          if (el(prefix + '-auth-header-name')) {
+            const staticHeaders = auth?.static?.headers && typeof auth.static.headers === 'object' ? auth.static.headers : {};
+            const first = Object.entries(staticHeaders)[0] || [];
+            el(prefix + '-auth-header-name').value = first[0] ? String(first[0]) : '';
+          }
+          if (el(prefix + '-auth-secret-ref')) {
+            let secretRef = String(auth?.static?.secret_ref || '');
+            if (!secretRef) {
+              const staticHeaders = auth?.static?.headers && typeof auth.static.headers === 'object' ? auth.static.headers : {};
+              const firstValue = Object.values(staticHeaders)[0];
+              const matchCurly = String(firstValue || '').match(/{{\s*([a-zA-Z0-9_.-]+)\s*}}/);
+              const matchDollar = String(firstValue || '').match(/\$\{\s*([a-zA-Z0-9_.-]+)\s*\}/);
+              if (matchCurly) secretRef = matchCurly[1];
+              else if (matchDollar) secretRef = matchDollar[1];
+            }
+            el(prefix + '-auth-secret-ref').value = secretRef;
+          }
+          if (el(prefix + '-auth-profile')) {
+            el(prefix + '-auth-profile').value = String(auth?.key_rotation?.profile || '');
+          }
         }
          function setHtml(id, html) {
            const node = el(id);
@@ -324,6 +605,40 @@
           if (!mode && names.length === 0) return null;
           return { mode, names };
         }
+        function parseHeaderForwardingFromYaml(yamlText) {
+          const text = String(yamlText || '');
+          const lines = text.split('\n');
+          let inHeader = false;
+          let inNames = false;
+          let mode = '';
+          const names = [];
+          for (const line of lines) {
+            if (/^\S/.test(line)) {
+              inHeader = line.startsWith('header_forwarding:');
+              inNames = false;
+              continue;
+            }
+            if (inHeader && /^\s{2}\S/.test(line)) {
+              const modeMatch = line.match(/^\s{2}mode:\s*(\w+)\s*$/);
+              if (modeMatch) {
+                mode = modeMatch[1].toLowerCase();
+                inNames = false;
+                continue;
+              }
+              if (/^\s{2}names:\s*$/.test(line)) {
+                inNames = true;
+                continue;
+              }
+              inNames = false;
+            }
+            if (inHeader && inNames) {
+              const itemMatch = line.match(/^\s{4}-\s*(.+)\s*$/);
+              if (itemMatch) names.push(itemMatch[1].trim());
+            }
+          }
+          if (!mode && names.length === 0) return null;
+          return { mode, names };
+        }
         function updateProxyHeader(proxyName) {
           const host = window.location.host || '';
           const name = String(proxyName || '').trim();
@@ -369,6 +684,7 @@
             const jwt = config?.jwt || {};
             const inbound = jwt.inbound || {};
             const outbound = jwt.outbound || {};
+            const jwtInboundTs = config?.http_auth?.profiles?.jwt_inbound?.timestamp_format || 'epoch_ms';
             setJwtEnabled(jwt.enabled !== false);
             setJwtInboundEnabled(!!inbound.enabled);
             setJwtOutboundEnabled(!!outbound.enabled);
@@ -377,7 +693,7 @@
             if (el('jwt-inbound-scheme')) el('jwt-inbound-scheme').value = String(inbound.scheme || 'Bearer');
             if (el('jwt-inbound-issuer')) el('jwt-inbound-issuer').value = inbound.issuer || '';
             if (el('jwt-inbound-audience')) el('jwt-inbound-audience').value = inbound.audience || '';
-            setRequestForm('jwt-jwks', inbound.http_request || {});
+            setRequestForm('jwt-jwks', jwt.http_request || inbound.http_request || {});
             if (el('jwt-inbound-skew')) el('jwt-inbound-skew').value = inbound.clock_skew_seconds == null ? '' : String(inbound.clock_skew_seconds);
             if (el('jwt-outbound-header')) el('jwt-outbound-header').value = String(outbound.header || 'Authorization');
             if (el('jwt-outbound-scheme')) el('jwt-outbound-scheme').value = String(outbound.scheme || 'Bearer');
@@ -385,6 +701,7 @@
             if (el('jwt-outbound-audience')) el('jwt-outbound-audience').value = outbound.audience || '';
             if (el('jwt-outbound-subject')) el('jwt-outbound-subject').value = outbound.subject || '';
             if (el('jwt-outbound-ttl')) el('jwt-outbound-ttl').value = outbound.ttl_seconds == null ? '' : String(outbound.ttl_seconds);
+            if (el('jwt-inbound-ts-format')) el('jwt-inbound-ts-format').value = jwtInboundTs || 'epoch_ms';
           } catch {
             // no-op
           }
@@ -392,14 +709,7 @@
         function openConfigTab() {
           document.querySelector('.tab-btn[data-tab="config"]')?.click();
         }
-        function setOutboundMode(mode) {
-          const m = String(mode || 'static_header').trim();
-          const staticNode = el('outbound-static-fields');
-          const autoNode = el('outbound-auto-fields');
-          const isStatic = m === 'static_header';
-           if (staticNode) staticNode.style.display = isStatic ? 'block' : 'none';
-           if (autoNode) autoNode.style.display = isStatic ? 'none' : 'block';
-         }
+        function setOutboundMode() {}
          function extractApiErrorText(payload, fallback) {
            if (payload && typeof payload === 'object' && payload.error && typeof payload.error === 'object') {
              const code = payload.error.code ? String(payload.error.code) : 'ERROR';
@@ -444,18 +754,20 @@
            }
            return action + '\\n\\n' + JSON.stringify(payload, null, 2);
          }
-         function setCurrentKey(key, fromStorage) {
+        function setCurrentKey(key, fromStorage) {
            currentKey = String(key || '').trim();
            const shell = el('admin-shell');
            const auth = el('admin-auth');
            if (shell) shell.style.display = currentKey ? 'block' : 'none';
            if (auth) auth.style.display = currentKey ? 'none' : 'block';
            if (!currentKey) {
+             stopLiveLogStream();
              showWarning('');
               return;
             }
          }
         function handleUnauthorized() {
+           stopLiveLogStream();
            currentKey = '';
            try { sessionStorage.removeItem(ADMIN_ACCESS_TOKEN_STORAGE); } catch {}
            if (el('admin-key')) el('admin-key').value = '';
@@ -464,6 +776,7 @@
            showWarning('Session logged out. Provide admin key again to login.');
          }
         function logoutExplicit() {
+          stopLiveLogStream();
           currentKey = '';
           try { sessionStorage.removeItem(ADMIN_ACCESS_TOKEN_STORAGE); } catch {}
           if (el('admin-key')) el('admin-key').value = '';
@@ -495,12 +808,188 @@
            if (expectText) return text;
            try { return JSON.parse(text); } catch { return text; }
          }
+        function setLiveLogStatus(text, kind) {
+          const node = el('live-log-status');
+          if (!node) return;
+          node.textContent = String(text || '');
+          node.style.borderColor = '#ddd';
+          node.style.background = '#fff';
+          node.style.color = '#0f172a';
+          if (kind === 'ok') {
+            node.style.borderColor = '#bbf7d0';
+            node.style.background = '#f0fdf4';
+            node.style.color = '#14532d';
+          } else if (kind === 'warn') {
+            node.style.borderColor = '#fde68a';
+            node.style.background = '#fefce8';
+            node.style.color = '#854d0e';
+          } else if (kind === 'error') {
+            node.style.borderColor = '#fecaca';
+            node.style.background = '#fef2f2';
+            node.style.color = '#991b1b';
+          }
+        }
+        function appendLiveLog(text) {
+          const node = el('live-log-output');
+          if (!node) return;
+          const next = (node.textContent || '') + String(text || '') + '\n';
+          node.textContent = next.length > LIVE_LOG_MAX_CHARS
+            ? next.slice(next.length - LIVE_LOG_MAX_CHARS)
+            : next;
+          node.scrollTop = node.scrollHeight;
+        }
+        function clearLiveLogReconnectTimer() {
+          if (liveLogReconnectTimer) {
+            clearTimeout(liveLogReconnectTimer);
+            liveLogReconnectTimer = null;
+          }
+        }
+        function stopLiveLogStream() {
+          liveLogShouldReconnect = false;
+          clearLiveLogReconnectTimer();
+          if (liveLogStreamAbortController) {
+            try { liveLogStreamAbortController.abort(); } catch {}
+            liveLogStreamAbortController = null;
+          }
+          setLiveLogStatus('Disconnected.', null);
+        }
+        function scheduleLiveLogReconnect(delayMs) {
+          clearLiveLogReconnectTimer();
+          if (!liveLogShouldReconnect || !currentKey || currentTabName !== 'live-log') return;
+          liveLogReconnectTimer = setTimeout(() => {
+            startLiveLogStream();
+          }, Math.max(500, Number(delayMs || 1500)));
+        }
+        function parseSsePayload(block) {
+          const lines = String(block || '').split('\n');
+          let event = 'message';
+          const dataLines = [];
+          for (const line of lines) {
+            if (!line || line.startsWith(':')) continue;
+            if (line.startsWith('event:')) {
+              event = line.slice(6).trim() || 'message';
+              continue;
+            }
+            if (line.startsWith('data:')) {
+              dataLines.push(line.slice(5).trimStart());
+            }
+          }
+          return { event, data: dataLines.join('\n') };
+        }
+        async function startLiveLogStream() {
+          if (!currentKey) {
+            setLiveLogStatus('Login required.', 'warn');
+            return;
+          }
+          if (currentTabName !== 'live-log') return;
+          if (liveLogStreamAbortController) return;
+          clearLiveLogReconnectTimer();
+          liveLogShouldReconnect = true;
+          const controller = new AbortController();
+          liveLogStreamAbortController = controller;
+          setLiveLogStatus('Connecting...', 'warn');
+          try {
+            const res = await fetch(ADMIN_ROOT + '/live-log/stream', {
+              method: 'GET',
+              headers: { 'Authorization': 'Bearer ' + currentKey, 'Accept': 'text/event-stream' },
+              signal: controller.signal,
+            });
+            if (res.status === 401) {
+              handleUnauthorized();
+              setLiveLogStatus('Unauthorized. Login again.', 'error');
+              return;
+            }
+            if (res.status === 409) {
+              setLiveLogStatus('Logging is disabled. Enable logging first.', 'warn');
+              return;
+            }
+            if (!res.ok || !res.body) {
+              throw new Error('Stream failed (' + res.status + ')');
+            }
+            setLiveLogStatus('Connected. Streaming logs...', 'ok');
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              const blocks = buffer.split('\n\n');
+              buffer = blocks.pop() || '';
+              for (const block of blocks) {
+                const parsed = parseSsePayload(block);
+                if (!parsed.data) continue;
+                let payload = parsed.data;
+                try {
+                  payload = JSON.parse(parsed.data);
+                } catch {}
+                if (parsed.event === 'trace') {
+                  const traceText = (payload && typeof payload === 'object' && payload.text != null)
+                    ? String(payload.text)
+                    : String(parsed.data);
+                  appendLiveLog(traceText);
+                  continue;
+                }
+                if (parsed.event === 'connected') {
+                  appendLiveLog('[connected] ' + (payload?.timestamp || new Date().toISOString()));
+                  continue;
+                }
+                if (parsed.event === 'last_trace' && payload?.text) {
+                  appendLiveLog('[last trace]\n' + String(payload.text));
+                  continue;
+                }
+                appendLiveLog(typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2));
+              }
+            }
+            if (liveLogShouldReconnect && currentTabName === 'live-log') {
+              setLiveLogStatus('Disconnected. Reconnecting...', 'warn');
+              liveLogStreamAbortController = null;
+              scheduleLiveLogReconnect(1000);
+              return;
+            }
+            setLiveLogStatus('Disconnected.', null);
+          } catch (e) {
+            if (controller.signal.aborted) {
+              setLiveLogStatus('Disconnected.', null);
+            } else {
+              setLiveLogStatus('Stream error: ' + String(e.message || e), 'error');
+              if (liveLogShouldReconnect && currentTabName === 'live-log') {
+                scheduleLiveLogReconnect(2000);
+              }
+            }
+          } finally {
+            if (liveLogStreamAbortController === controller) {
+              liveLogStreamAbortController = null;
+            }
+          }
+        }
+        async function loadLiveLogStatusAndMaybeConnect() {
+          try {
+            const payload = await apiCall(ADMIN_ROOT + '/debug', 'GET');
+            const data = payload?.data || {};
+            const enabled = !!data.enabled;
+            if (!enabled) {
+              stopLiveLogStream();
+              setLiveLogStatus('Logging is disabled. Enable it on the Logging page to stream logs.', 'warn');
+              return;
+            }
+            setLiveLogStatus('Logging is enabled. Connecting...', 'ok');
+            if (currentTabName === 'live-log') {
+              startLiveLogStream();
+            }
+          } catch (e) {
+            setLiveLogStatus('Unable to load logging status: ' + String(e.message || e), 'error');
+          }
+        }
         function attachTabs() {
           const btns = document.querySelectorAll('.tab-btn');
           const panels = document.querySelectorAll('.tab-panel');
           function setActiveTab(name) {
             if (name === currentTabName) return;
             if (!confirmLeaveDirty(currentTabName)) return;
+            if (currentTabName === 'live-log' && name !== 'live-log') {
+              stopLiveLogStream();
+            }
             panels.forEach((panel) => {
               panel.style.display = panel.id === 'tab-' + name ? 'block' : 'none';
             });
@@ -511,16 +1000,42 @@
                btn.style.borderColor = active ? '#111827' : '#cbd5e1';
                btn.style.fontWeight = active ? '700' : '500';
              });
-             if (name === 'debug') {
-               debugLoadTrace();
-               loadLoggingStatus();
-             }
-             if (name === 'outbound-auth') keyRotationLoad();
+            if (name === 'debug') {
+              if (el('logging-secret-template') && !el('logging-secret')) {
+                setHtml('logging-secret-template', renderSecretStorage('logging', {
+                  label: 'Logging auth secret',
+                  placeholder: 'set logging auth secret',
+                  inputId: 'logging-secret',
+                  timestampFormatId: 'logging-ts-format',
+                  timestampFormatLabel: 'Timestamp format',
+                  timestampFormatValue: 'epoch_ms',
+                  buttons: [{ id: 'logging-secret-delete-btn', label: 'Delete secret', kind: 'danger' }],
+                }));
+                bindSecretStorage('logging', 'logging-secret');
+                bindOnce('logging-secret-delete-btn', loggingSecretDelete);
+              }
+              debugLoadTrace();
+              loadLoggingStatus();
+            }
+            if (name === 'live-log') {
+              loadLiveLogStatusAndMaybeConnect();
+            }
+            if (name === 'outbound-auth') {
+              keyRotationLoad();
+            }
             if (name === 'outbound-transform') {
               transformConfigLoad();
               headersList();
-              if (el('headers-input-body') && !el('headers-input-body').children.length) {
-                addHeaderInputRow('', '');
+              if (el('headers-input-wrap')) {
+                setHtml('headers-input-wrap', renderHeaderList('headers-input', {
+                  label: 'Headers',
+                  helpText: 'YAML-style: Header-Name: value per line',
+                  disabled: false,
+                  rows: 5,
+                  placeholder: 'Header-Name: value',
+                  value: '',
+                }));
+                bindHeaderListToggles('headers-input');
               }
             }
             if (name === 'admin-auth') {
@@ -529,6 +1044,23 @@
             if (name === 'inbound-auth') {
               keyRotationLoad();
               keysRefresh();
+              if (el('jwt-inbound-secret-template') && !el('jwt-inbound-secret')) {
+                setHtml('jwt-inbound-secret-template', renderSecretStorage('jwt-inbound', {
+                  label: 'JWT inbound auth secret',
+                  placeholder: 'set JWT auth secret',
+                  inputId: 'jwt-inbound-secret',
+                  timestampFormatId: 'jwt-inbound-ts-format',
+                  timestampFormatLabel: 'Timestamp format',
+                  timestampFormatValue: 'epoch_ms',
+                  buttons: [
+                    { id: 'jwt-inbound-save-btn', label: 'Save/Update secret' },
+                    { id: 'jwt-inbound-delete-btn', label: 'Delete secret', kind: 'danger' },
+                  ],
+                }));
+                bindSecretStorage('jwt-inbound', 'jwt-inbound-secret');
+                bindOnce('jwt-inbound-save-btn', () => saveAuthProfileSecret('jwt_inbound', 'jwt-inbound-secret', 'keys-output'));
+                bindOnce('jwt-inbound-delete-btn', () => deleteAuthProfileSecret('jwt_inbound', 'keys-output'));
+              }
             }
             if (name === 'inbound-transform') transformConfigLoad();
             if (name === 'sandbox') sandboxInit();
@@ -621,9 +1153,16 @@
             if (!config.debug) config.debug = {};
             if (enabled) {
               const req = readRequestForm('logging-req');
+              await persistRequestAuthSecret('logging-req');
               config.debug.loggingEndpoint = { http_request: req };
             } else {
               config.debug.loggingEndpoint = { http_request: null };
+            }
+            if (!config.http_auth) config.http_auth = {};
+            if (!config.http_auth.profiles) config.http_auth.profiles = {};
+            if (!config.http_auth.profiles.logging) config.http_auth.profiles.logging = { headers: {} };
+            if (el('logging-ts-format')) {
+              config.http_auth.profiles.logging.timestamp_format = el('logging-ts-format')?.value || 'epoch_ms';
             }
             const cfgRes = await fetch(ADMIN_ROOT + '/config', {
               method: 'PUT',
@@ -655,14 +1194,15 @@
            }
            catch (e) { showWarning(String(e.message || e)); }
          }
-         async function loadLoggingStatus() {
-           try {
-             const [debugStatus, secretStatus, yamlText] = await Promise.all([
-               apiCall(ADMIN_ROOT + '/debug', 'GET'),
-               apiCall(ADMIN_ROOT + '/debug/loggingSecret', 'GET'),
-               apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true),
-             ]);
+        async function loadLoggingStatus() {
+          try {
+            const [debugStatus, secretStatus, yamlText] = await Promise.all([
+              apiCall(ADMIN_ROOT + '/debug', 'GET'),
+              apiCall(ADMIN_ROOT + '/debug/loggingSecret', 'GET'),
+              apiCall(ADMIN_ROOT + '/config', 'GET', undefined, true),
+            ]);
             let endpointRequest = null;
+            let loggingTsFormat = 'epoch_ms';
             try {
               const res = await fetch(ADMIN_ROOT + '/config/validate', {
                 method: 'POST',
@@ -676,8 +1216,12 @@
                 const cfg = parsed.data.config.debug.loggingEndpoint;
                 endpointRequest = cfg.http_request || null;
               }
+              if (res.ok && parsed?.data?.config?.http_auth?.profiles?.logging?.timestamp_format) {
+                loggingTsFormat = parsed.data.config.http_auth.profiles.logging.timestamp_format || 'epoch_ms';
+              }
             } catch {}
             setRequestForm('logging-req', endpointRequest || {});
+            if (el('logging-ts-format')) el('logging-ts-format').value = loggingTsFormat || 'epoch_ms';
             const d = debugStatus?.data || {};
             const enabledText = d.enabled ? 'enabled' : 'disabled';
             if (el('logging-status')) {
@@ -698,6 +1242,15 @@
             if (el('logging-config-enabled')) el('logging-config-enabled').checked = configEnabled;
             if (el('logging-config-fields')) el('logging-config-fields').style.display = configEnabled ? 'block' : 'none';
             if (el('logging-secret-wrap')) el('logging-secret-wrap').style.display = configEnabled ? 'block' : 'none';
+            if (currentTabName === 'live-log') {
+              if (d.enabled) {
+                setLiveLogStatus('Logging is enabled. Connecting...', 'ok');
+                startLiveLogStream();
+              } else {
+                stopLiveLogStream();
+                setLiveLogStatus('Logging is disabled. Enable it on the Logging page to stream logs.', 'warn');
+              }
+            }
           } catch (e) {
             showWarning(String(e.message || e));
           }
@@ -817,22 +1370,16 @@
            if (!Number.isInteger(n) || n < 1) throw new Error('Expiry fields must be null or positive integers.');
            return n;
          }
-         async function keyRotationLoad() {
-           try {
-             const [payload, headersPayload] = await Promise.all([
-               apiCall(ADMIN_ROOT + '/key-rotation-config', 'GET'),
-               apiCall(ADMIN_ROOT + '/headers', 'GET'),
-             ]);
-             const d = payload?.data || {};
-             const names = Array.isArray(headersPayload?.enriched_headers) ? headersPayload.enriched_headers : [];
-             const inferredStaticKey = names.includes('authorization') ? 'authorization' : (names[0] || '');
-             const staticHeaderKey = String(d.static_header_key || inferredStaticKey || '');
-             const staticHeaderValue = String(d.static_header_value || '');
-          const outboundMode = staticHeaderKey ? 'static_header' : 'autorotation';
-            if (el('outbound-mode')) el('outbound-mode').value = outboundMode || 'static_header';
-            if (el('outbound-static-header-key')) el('outbound-static-header-key').value = staticHeaderKey;
-            if (el('outbound-static-header-value')) el('outbound-static-header-value').value = staticHeaderValue;
-            setOutboundMode(outboundMode || 'static_header');
+        async function keyRotationLoad() {
+          try {
+            const payload = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'GET');
+            let targetTsFormat = 'epoch_ms';
+            try {
+              const config = await fetchConfigJsonFromYaml();
+              targetTsFormat = config?.http_auth?.profiles?.target?.timestamp_format || 'epoch_ms';
+            } catch {}
+            const d = payload?.data || {};
+            if (el('target-auth-ts-format')) el('target-auth-ts-format').value = targetTsFormat || 'epoch_ms';
              setOutboundAuthEnabled(!!d.enabled);
              if (el('kr-enabled')) el('kr-enabled').checked = !!d.enabled;
              if (el('kr-strategy')) el('kr-strategy').value = d.strategy || 'json_ttl';
@@ -853,28 +1400,12 @@
             setOutput('kr-output', String(e.message || e));
           }
         }
-         async function keyRotationSave() {
-           try {
-             const outboundAuthEnabled = !!el('outbound-auth-enabled')?.checked;
-             if (el('kr-enabled')) el('kr-enabled').checked = outboundAuthEnabled;
-             const mode = (el('outbound-mode')?.value || 'autorotation');
-             const staticHeaderKey = (el('outbound-static-header-key')?.value || '').trim();
-             const staticHeaderValue = el('outbound-static-header-value')?.value || '';
-             if (mode === 'static_header') {
-               if (!outboundAuthEnabled) {
-                 setOutput('kr-output', 'Outbound auth disabled.');
-                 return;
-               }
-               if (!staticHeaderKey || !staticHeaderValue) {
-                 throw new Error('Static header key and secret value are required.');
-               }
-              await apiCall(ADMIN_ROOT + '/headers/' + encodeURIComponent(staticHeaderKey), 'PUT', { value: staticHeaderValue });
-              setOutput('kr-output', 'Saved static outbound auth header: ' + staticHeaderKey);
-              await headersList();
-              clearDirty('outbound-auth');
-              return;
-            }
+        async function keyRotationSave() {
+          try {
+            const outboundAuthEnabled = !!el('outbound-auth-enabled')?.checked;
+            if (el('kr-enabled')) el('kr-enabled').checked = outboundAuthEnabled;
              const req = readRequestForm('kr');
+             await persistRequestAuthSecret('kr');
              const payload = {
                enabled: outboundAuthEnabled,
                strategy: (el('kr-strategy')?.value || 'json_ttl'),
@@ -887,6 +1418,20 @@
                retry_once_on_401: !!el('kr-retry-on-401')?.checked,
              };
             const out = await apiCall(ADMIN_ROOT + '/key-rotation-config', 'PUT', payload);
+            try {
+              const config = await fetchConfigJsonFromYaml();
+              if (!config.http_auth) config.http_auth = {};
+              if (!config.http_auth.profiles) config.http_auth.profiles = {};
+              if (!config.http_auth.profiles.target) config.http_auth.profiles.target = { headers: {} };
+              if (el('target-auth-ts-format')) {
+                config.http_auth.profiles.target.timestamp_format = el('target-auth-ts-format')?.value || 'epoch_ms';
+              }
+              await fetch(ADMIN_ROOT + '/config', {
+                method: 'PUT',
+                headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'application/json' },
+                body: JSON.stringify(config),
+              });
+            } catch {}
             setOutput('kr-output', out);
             clearDirty('outbound-auth');
           } catch (e) {
@@ -901,6 +1446,9 @@
             const outboundEnabled = !!el('jwt-outbound-enabled')?.checked;
             const inboundMode = el('jwt-inbound-mode')?.value || 'shared_secret';
             const jwksRequest = readRequestForm('jwt-jwks');
+            if (inboundMode === 'jwks') {
+              await persistRequestAuthSecret('jwt-jwks');
+            }
             const jwtConfig = {
               enabled: jwtEnabled,
               inbound: {
@@ -922,8 +1470,16 @@
                 subject: normalizeOptionalString(el('jwt-outbound-subject')?.value),
                 ttl_seconds: normalizeOptionalInt(el('jwt-outbound-ttl')?.value),
               },
+              http_request: inboundMode === 'jwks' ? jwksRequest : null,
+              authorization: inboundMode === 'jwks' ? (jwksRequest.authorization || null) : null,
             };
             config.jwt = jwtConfig;
+            if (!config.http_auth) config.http_auth = {};
+            if (!config.http_auth.profiles) config.http_auth.profiles = {};
+            if (!config.http_auth.profiles.jwt_inbound) config.http_auth.profiles.jwt_inbound = { headers: {} };
+            if (el('jwt-inbound-ts-format')) {
+              config.http_auth.profiles.jwt_inbound.timestamp_format = el('jwt-inbound-ts-format')?.value || 'epoch_ms';
+            }
             const cfgRes = await fetch(ADMIN_ROOT + '/config', {
               method: 'PUT',
               headers: { 'Authorization': 'Bearer ' + currentKey, 'Content-Type': 'application/json' },
@@ -1045,37 +1601,6 @@
           const headers = normalizeRuleHeadersForUi(rule || {});
           return { ...rule, headers };
         }
-        function hasHeaderRowErrors(headers) {
-          return (headers || []).some((h) => !String(h?.name || '').trim() || !String(h?.value || '').trim());
-        }
-        function renderHeaderRows(kind, ruleIndex, headers) {
-          const safeHeaders = Array.isArray(headers) ? headers : [];
-          if (!safeHeaders.length) {
-            return '<div style="color:#64748b;margin:6px 0;">(no header matches)</div>';
-          }
-          return '<table style="width:100%;border-collapse:collapse;">'
-            + '<thead><tr>'
-            + '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e2e8f0;">Header Name</th>'
-            + '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e2e8f0;">Header Value</th>'
-            + '<th style="width:1%;padding:6px 8px;border-bottom:1px solid #e2e8f0;"></th>'
-            + '</tr></thead><tbody>'
-            + safeHeaders.map((h, j) => {
-            const name = htmlEscape(h?.name || '');
-            const value = htmlEscape(h?.value || '');
-            return '<tr>'
-              + '<td style="padding:6px 8px;">'
-              + '<input data-kind="' + kind + '" data-field="headerName" data-index="' + ruleIndex + '" data-header-index="' + j + '" value="' + name + '" placeholder="Header Name" style="width:100%;max-width:260px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
-              + '</td>'
-              + '<td style="padding:6px 8px;">'
-              + '<input data-kind="' + kind + '" data-field="headerValue" data-index="' + ruleIndex + '" data-header-index="' + j + '" value="' + value + '" placeholder="Header Value" style="width:100%;max-width:360px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
-              + '</td>'
-              + '<td style="padding:6px 8px;text-align:right;">'
-              + '<a href="#" class="rule-header-remove-btn" data-kind="' + kind + '" data-index="' + ruleIndex + '" data-header-index="' + j + '">Remove</a>'
-              + '</td>'
-              + '</tr>';
-          }).join('')
-          + '</tbody></table>';
-        }
         function validateHttpMethodList(raw) {
           const list = parseCsvList(raw);
           if (!list.length) return { ok: false, message: 'At least one HTTP method is required.' };
@@ -1116,7 +1641,7 @@
             const methodTarget = 'rule-' + kind + '-' + i + '-method';
             const statusTarget = 'rule-' + kind + '-' + i + '-status';
             const headersTarget = 'rule-' + kind + '-' + i + '-headers';
-            const disableHeaderAdd = hasHeaderRowErrors(headers);
+            const headerValue = headersObjectToMultiline(headersArrayToObject(headers));
             return '<div style="border:1px solid #e2e8f0;border-radius:8px;padding:10px;">'
               + '<label style="display:block;margin:0 0 4px;">Name</label>'
               + '<input data-kind="' + kind + '" data-field="name" data-index="' + i + '" value="' + htmlEscape(rule.name || '') + '" style="width:100%;max-width:460px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
@@ -1148,14 +1673,23 @@
               + '</label>'
               + '<div id="' + headersTarget + '" style="display:' + (headersEnabled ? 'block' : 'none') + ';">'
               + '<div style="margin:6px 0 4px;">List of headers</div>'
-              + renderHeaderRows(kind, i, headers)
-              + '<div style="margin-top:8px;"><button type="button" class="rule-header-add-btn" data-kind="' + kind + '" data-index="' + i + '"' + (disableHeaderAdd ? ' disabled style="opacity:0.5;cursor:not-allowed;"' : '') + '>Add header match rule</button></div>'
+              + renderHeaderList('rule-' + kind + '-' + i, {
+                label: 'Headers',
+                helpText: 'YAML-style: Header-Name: value per line',
+                disabled: false,
+                rows: 4,
+                placeholder: 'Header-Name: value',
+                value: headerValue,
+              })
               + '</div>'
               + '<label style="display:block;margin:8px 0 4px;">JSONata Expression</label>'
               + '<textarea data-kind="' + kind + '" data-field="expr" data-index="' + i + '" rows="4" style="width:100%;max-width:740px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">' + htmlEscape(rule.expr || '') + '</textarea>'
               + '<div style="margin-top:8px;"><a href="#" class="rule-remove-btn" data-kind="' + kind + '" data-index="' + i + '">Remove rule</a></div>'
               + '</div>';
           }).join('');
+          rules.forEach((_, i) => {
+            bindHeaderListToggles('rule-' + kind + '-' + i);
+          });
         }
          function parseCsvList(v) {
            return String(v || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -1172,18 +1706,12 @@
             const name = (get('name')?.value || '').trim();
             const expr = get('expr')?.value || '';
             if (!name || !expr.trim()) continue;
-            const headers = [];
             const headerEnabled = !!getToggle('rule-' + kind + '-' + i + '-headers')?.checked;
+            let headers = [];
             if (headerEnabled) {
-              const headerNodes = node.querySelectorAll('[data-kind="' + kind + '"][data-field="headerName"][data-index="' + i + '"]');
-              headerNodes.forEach((input) => {
-                const headerIndex = input.getAttribute('data-header-index');
-                const nameInput = input;
-                const valueInput = node.querySelector('[data-kind="' + kind + '"][data-field="headerValue"][data-index="' + i + '"][data-header-index="' + headerIndex + '"]');
-                const hName = String(nameInput?.value || '').trim();
-                const hValue = String(valueInput?.value || '').trim();
-                if (hName && hValue) headers.push({ name: hName, value: hValue });
-              });
+              const headersText = node.querySelector('#rule-' + kind + '-' + i + '-headers')?.value || '';
+              const headersObj = headersMultilineToObject(headersText);
+              headers = Object.entries(headersObj).map(([name, value]) => ({ name, value: String(value ?? '') }));
             }
             if (kind === 'outbound') {
               const methodEnabled = !!getToggle('rule-' + kind + '-' + i + '-method')?.checked;
@@ -1235,6 +1763,12 @@
                 if (parsed) {
                   headerMode = parsed.mode || headerMode;
                   headerNames = parsed.names || headerNames;
+                } else {
+                  const fallback = parseHeaderForwardingFromYaml(yamlText);
+                  if (fallback) {
+                    headerMode = fallback.mode || headerMode;
+                    headerNames = fallback.names || headerNames;
+                  }
                 }
               } catch {
                 // ignore config fallback errors
@@ -1250,7 +1784,6 @@
             if (el('outbound-custom-js')) el('outbound-custom-js').value = outbound.custom_js_preprocessor || '';
             if (el('outbound-fallback')) el('outbound-fallback').value = String(outbound.fallback || 'passthrough');
             if (el('inbound-default-expr')) el('inbound-default-expr').value = String(inbound.defaultExpr || '');
-            if (el('inbound-custom-js')) el('inbound-custom-js').value = inbound.custom_js_preprocessor || '';
             if (el('inbound-fallback')) el('inbound-fallback').value = String(inbound.fallback || 'passthrough');
             outboundRuleDrafts = Array.isArray(outbound.rules) ? outbound.rules.map(normalizeRuleForUi) : [];
             inboundRuleDrafts = Array.isArray(inbound.rules) ? inbound.rules.map(normalizeRuleForUi) : [];
@@ -1267,6 +1800,7 @@
              const globalEnabled = !!(el('transform-global-enabled-outbound')?.checked || el('transform-global-enabled-inbound')?.checked);
              const outboundRules = collectRuleDrafts('outbound');
              const inboundRules = collectRuleDrafts('inbound');
+            const inboundCustomEl = el('inbound-custom-js');
             const payload = {
               enabled: globalEnabled,
               outbound: {
@@ -1278,7 +1812,7 @@
               },
               inbound: {
                 enabled: true,
-                custom_js_preprocessor: (el('inbound-custom-js')?.value || '').trim() || null,
+                ...(inboundCustomEl ? { custom_js_preprocessor: (inboundCustomEl.value || '').trim() || null } : {}),
                 defaultExpr: el('inbound-default-expr')?.value || '',
                 fallback: el('inbound-fallback')?.value || 'passthrough',
                 header_filtering: {
@@ -1297,21 +1831,6 @@
             if (kind === 'outbound') setOutput('headers-output', String(e.message || e));
             else setOutput('inbound-transform-output', String(e.message || e));
           }
-        }
-        function addHeaderMatchRule(kind, ruleIndex) {
-          const rules = kind === 'outbound' ? outboundRuleDrafts : inboundRuleDrafts;
-          const rule = rules[ruleIndex];
-          if (!rule) return;
-          if (!Array.isArray(rule.headers)) rule.headers = [];
-          rule.headers.push({ name: '', value: '' });
-          renderTransformRules(kind);
-        }
-        function removeHeaderMatchRule(kind, ruleIndex, headerIndex) {
-          const rules = kind === 'outbound' ? outboundRuleDrafts : inboundRuleDrafts;
-          const rule = rules[ruleIndex];
-          if (!rule || !Array.isArray(rule.headers)) return;
-          rule.headers.splice(headerIndex, 1);
-          renderTransformRules(kind);
         }
          function sandboxUpdateAuthValueVisibility() {
            const mode = el('sandbox-auth-mode')?.value || 'admin_token';
@@ -1481,57 +2000,23 @@
             setOutput('headers-output', String(e.message || e));
           }
         }
-        function addHeaderInputRow(name, value) {
-          const body = el('headers-input-body');
-          if (!body) return;
-          const idx = body.children.length;
-          const row = document.createElement('tr');
-          row.innerHTML = ''
-            + '<td style="padding:6px 8px;">'
-            + '<input data-header-input="name" data-index="' + idx + '" value="' + htmlEscape(name || '') + '" placeholder="Header Key" style="width:100%;max-width:260px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
-            + '</td>'
-            + '<td style="padding:6px 8px;">'
-            + '<input data-header-input="value" data-index="' + idx + '" value="' + htmlEscape(value || '') + '" placeholder="Header Value" style="width:100%;max-width:360px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;" />'
-            + '</td>'
-            + '<td style="padding:6px 8px;text-align:right;">'
-            + '<a href="#" class="remove-header-input" data-index="' + idx + '">Remove</a>'
-            + '</td>';
-          body.appendChild(row);
-          updateHeaderInputAddButton();
-        }
-        function updateHeaderInputAddButton() {
-          const body = el('headers-input-body');
-          const btn = el('headers-add-row-btn');
-          if (!body || !btn) return;
-          let hasEmpty = false;
-          body.querySelectorAll('tr').forEach((row) => {
-            const name = String(row.querySelector('[data-header-input="name"]')?.value || '').trim();
-            const value = String(row.querySelector('[data-header-input="value"]')?.value || '').trim();
-            if (!name || !value) hasEmpty = true;
-          });
-          btn.disabled = hasEmpty;
-          btn.style.opacity = hasEmpty ? '0.5' : '1';
-          btn.style.cursor = hasEmpty ? 'not-allowed' : 'pointer';
-        }
         async function headersSave() {
           try {
-            const body = el('headers-input-body');
-            if (!body) return;
-            const rows = Array.from(body.querySelectorAll('tr'));
-            if (!rows.length) {
-              setOutput('headers-output', 'Add at least one header row.');
+            const text = el('headers-input-headers')?.value || '';
+            const headersObj = headersMultilineToObject(text);
+            const entries = Object.entries(headersObj);
+            if (!entries.length) {
+              setOutput('headers-output', 'Add at least one header entry.');
               return;
             }
-            for (const row of rows) {
-              const name = String(row.querySelector('[data-header-input="name"]')?.value || '').trim();
-              const value = String(row.querySelector('[data-header-input="value"]')?.value || '').trim();
-              if (!name || !value) {
-                throw new Error('All header rows must include a key and value.');
+            for (const [name, value] of entries) {
+              const headerName = String(name || '').trim();
+              const headerValue = String(value ?? '').trim();
+              if (!headerName || !headerValue) {
+                throw new Error('All header entries must include a key and value.');
               }
-              await apiCall(ADMIN_ROOT + '/headers/' + encodeURIComponent(name), 'PUT', { value });
+              await apiCall(ADMIN_ROOT + '/headers/' + encodeURIComponent(headerName), 'PUT', { value: headerValue });
             }
-            body.innerHTML = '';
-            addHeaderInputRow('', '');
             setOutput('headers-output', 'Enrichments updated.');
             await headersList();
           }
@@ -1639,13 +2124,30 @@
         function bind() {
           attachTabs();
           updateProxyHeader('');
-          if (el('sandbox-request-form')) setHtml('sandbox-request-form', renderRequestForm('sandbox'));
-          if (el('kr-request-form')) setHtml('kr-request-form', renderRequestForm('kr'));
+          if (el('sandbox-request-form')) {
+            setHtml('sandbox-request-form', renderRequestForm('sandbox'));
+            bindRequestFormToggles('sandbox');
+          }
+          if (el('kr-request-form')) {
+            setHtml('kr-request-form', renderRequestForm('kr', {
+              enableHttpAuthorization: true,
+              authProfileHint: 'Use a configured profile such as target.',
+            }));
+            bindRequestFormToggles('kr');
+          }
           if (el('jwt-jwks-request-form')) {
-            setHtml('jwt-jwks-request-form', renderRequestForm('jwt-jwks'));
+            setHtml('jwt-jwks-request-form', renderRequestForm('jwt-jwks', {
+              enableHttpAuthorization: true,
+              authProfileHint: 'Use a configured profile such as jwt_inbound.',
+            }));
+            bindRequestFormToggles('jwt-jwks');
           }
           if (el('logging-request-form')) {
-            setHtml('logging-request-form', renderRequestForm('logging-req'));
+            setHtml('logging-request-form', renderRequestForm('logging-req', {
+              enableHttpAuthorization: true,
+              authProfileHint: 'Use a configured profile such as logging.',
+            }));
+            bindRequestFormToggles('logging-req');
           }
           if (el('jwt-endpoint-url')) el('jwt-endpoint-url').value = window.location.origin + '/_apiproxy/jwt';
           document.querySelectorAll('.tab-panel').forEach((panel) => {
@@ -1703,6 +2205,15 @@
             evt.preventDefault();
             debugLoadTrace();
           });
+          el('live-log-reconnect-link')?.addEventListener('click', (evt) => {
+            evt.preventDefault();
+            stopLiveLogStream();
+            loadLiveLogStatusAndMaybeConnect();
+          });
+          el('live-log-clear-link')?.addEventListener('click', (evt) => {
+            evt.preventDefault();
+            if (el('live-log-output')) el('live-log-output').textContent = '';
+          });
           el('logging-ttl-refresh-link')?.addEventListener('click', (evt) => {
             evt.preventDefault();
             loadLoggingStatus();
@@ -1736,7 +2247,6 @@
              openConfigTab();
            });
           el('footer-save-logging')?.addEventListener('click', loggingSave);
-          el('logging-secret-delete-btn')?.addEventListener('click', loggingSecretDelete);
            el('config-reload-link')?.addEventListener('click', (evt) => {
              evt.preventDefault();
              configLoad();
@@ -1750,9 +2260,6 @@
            el('outbound-auth-enabled')?.addEventListener('change', () => {
              setOutboundAuthEnabled(!!el('outbound-auth-enabled')?.checked);
            });
-          el('outbound-mode')?.addEventListener('change', () => {
-            setOutboundMode(el('outbound-mode')?.value || 'autorotation');
-          });
           el('jwt-enabled')?.addEventListener('change', () => {
             setJwtEnabled(!!el('jwt-enabled')?.checked);
           });
@@ -1781,18 +2288,6 @@
           });
           el('proxy-name')?.addEventListener('blur', () => configValidate(true));
            el('headers-save-btn')?.addEventListener('click', headersSave);
-           el('headers-add-row-btn')?.addEventListener('click', (evt) => {
-             evt.preventDefault();
-             addHeaderInputRow('', '');
-           });
-           el('headers-input-body')?.addEventListener('input', updateHeaderInputAddButton);
-           el('headers-input-body')?.addEventListener('click', (evt) => {
-             const link = evt.target?.closest ? evt.target.closest('.remove-header-input') : null;
-             if (!link) return;
-             evt.preventDefault();
-             link.closest('tr')?.remove();
-             updateHeaderInputAddButton();
-           });
           el('headers-list')?.addEventListener('click', (evt) => {
             const target = evt.target?.closest ? evt.target.closest('.delete-header-btn') : null;
             if (!target) return;
@@ -1820,26 +2315,6 @@
               }
               return;
             }
-            const addHeaderBtn = evt.target?.closest ? evt.target.closest('.rule-header-add-btn') : null;
-            if (addHeaderBtn && addHeaderBtn.getAttribute('data-kind') === kind) {
-              evt.preventDefault();
-              const checkbox = document.querySelector('.rule-match-toggle[data-kind="' + kind + '"][data-index="' + addHeaderBtn.getAttribute('data-index') + '"][data-target^="rule-' + kind + '-"][data-target$="-headers"]');
-              if (checkbox) checkbox.checked = true;
-              const idx = Number(addHeaderBtn.getAttribute('data-index') || -1);
-              if (idx >= 0) {
-                addHeaderMatchRule(kind, idx);
-                const panel = document.getElementById('rule-' + kind + '-' + idx + '-headers');
-                if (panel) panel.style.display = 'block';
-              }
-              return;
-            }
-            const removeHeaderBtn = evt.target?.closest ? evt.target.closest('.rule-header-remove-btn') : null;
-            if (removeHeaderBtn && removeHeaderBtn.getAttribute('data-kind') === kind) {
-              evt.preventDefault();
-              const idx = Number(removeHeaderBtn.getAttribute('data-index') || -1);
-              const hIdx = Number(removeHeaderBtn.getAttribute('data-header-index') || -1);
-              if (idx >= 0 && hIdx >= 0) removeHeaderMatchRule(kind, idx, hIdx);
-            }
           }
           el('outbound-rules-list')?.addEventListener('click', (evt) => handleRuleListClick('outbound', evt));
           el('inbound-rules-list')?.addEventListener('click', (evt) => handleRuleListClick('inbound', evt));
@@ -1853,27 +2328,6 @@
           }
           el('outbound-rules-list')?.addEventListener('change', handleRuleToggle);
           el('inbound-rules-list')?.addEventListener('change', handleRuleToggle);
-          function updateHeaderAddButton(kind, idx) {
-            const node = kind === 'outbound' ? el('outbound-rules-list') : el('inbound-rules-list');
-            if (!node) return;
-            const headerEnabled = node.querySelector('.rule-match-toggle[data-kind="' + kind + '"][data-index="' + idx + '"][data-target="rule-' + kind + '-' + idx + '-headers"]')?.checked;
-            if (!headerEnabled) return;
-            const headerNodes = node.querySelectorAll('[data-kind="' + kind + '"][data-field="headerName"][data-index="' + idx + '"]');
-            let hasEmpty = false;
-            headerNodes.forEach((input) => {
-              const headerIndex = input.getAttribute('data-header-index');
-              const name = String(input.value || '').trim();
-              const valueInput = node.querySelector('[data-kind="' + kind + '"][data-field="headerValue"][data-index="' + idx + '"][data-header-index="' + headerIndex + '"]');
-              const value = String(valueInput?.value || '').trim();
-              if (!name || !value) hasEmpty = true;
-            });
-            const addBtn = node.querySelector('.rule-header-add-btn[data-kind="' + kind + '"][data-index="' + idx + '"]');
-            if (addBtn) {
-              addBtn.disabled = hasEmpty;
-              addBtn.style.opacity = hasEmpty ? '0.5' : '1';
-              addBtn.style.cursor = hasEmpty ? 'not-allowed' : 'pointer';
-            }
-          }
           function handleRuleInputValidation(evt) {
             const target = evt.target;
             if (!target) return;

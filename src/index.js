@@ -29,6 +29,9 @@ import { PREPROCESSORS } from "./custom/preprocessors.js";
  * - POST /_apiproxy/admin/config/test-rule
  * - GET/PUT/DELETE /_apiproxy/admin/debug
  * - GET /_apiproxy/admin/debug/last
+ * - GET /_apiproxy/admin/live-log/stream
+ * - GET /_apiproxy/admin/swagger
+ * - GET /_apiproxy/admin/swagger/openapi.json
  * - PUT/DELETE /_apiproxy/admin/debug/loggingSecret
  */
 
@@ -50,9 +53,23 @@ const KV_ADMIN_SECONDARY_KEY_CREATED_AT = "admin_secondary_key_created_at";
 const KV_CONFIG_YAML = "config_yaml_v1";
 const KV_CONFIG_JSON = "config_json_v1";
 const KV_ENRICHED_HEADER_PREFIX = "enriched_header:";
+const KV_HTTP_SECRET_PREFIX = "http_secret:";
 const KV_BOOTSTRAP_ENRICHED_HEADER_NAMES = "bootstrap_enriched_header_names_v1";
 const KV_DEBUG_ENABLED_UNTIL_MS = "debug_enabled_until_ms";
-const KV_DEBUG_LOGGING_SECRET = "debug_logging_secret";
+
+const AUTH_PROFILE_PREFIXES = {
+  logging: "auth/logging",
+  target: "auth/target",
+  jwt_inbound: "auth/jwt_inbound",
+};
+const AUTH_PROFILE_FIELDS = [
+  "current",
+  "secondary",
+  "issued_at_ms",
+  "expires_at_ms",
+  "secondary_issued_at_ms",
+  "secondary_expires_at_ms",
+];
 const RESERVED_ROOT = "/_apiproxy";
 const ADMIN_ROOT = `${RESERVED_ROOT}/admin`;
 const DEFAULT_DOCS_URL = "https://github.com/jtreibick/api-transform-proxy/blob/main/README.md";
@@ -73,7 +90,8 @@ const EXPECTED_REQUEST_SCHEMA = {
   upstream: {
     method: "GET|POST|PUT|PATCH|DELETE",
     url: "https://... (or /path when X-Proxy-Host is provided)",
-    headers: "object<string,string> (optional)",
+    headers: "mapping<headerName,string> (optional)",
+    auth_profile: "string (optional)",
     body: {
       type: "none|json|urlencoded|raw",
       value: "any (optional)",
@@ -87,6 +105,14 @@ const EXPECTED_REQUEST_SCHEMA = {
 const CONFIG_SCHEMA_V1 = {
   targetHost: "string|null",
   proxyName: "string|null",
+  http_auth: {
+  profiles: {
+    name: {
+      headers: "mapping<headerName,string>",
+      timestamp_format: "epoch_ms|epoch_seconds|iso_8601",
+    },
+  },
+  },
   jwt: {
     enabled: "boolean",
     inbound: {
@@ -223,6 +249,9 @@ const BUILTIN_DEBUG_REDACT_HEADERS = new Set([
 const DEFAULT_CONFIG_V1 = {
   targetHost: null,
   proxyName: null,
+  http_auth: {
+    profiles: {},
+  },
   jwt: {
     enabled: false,
     inbound: {
@@ -309,6 +338,7 @@ const DEFAULT_CONFIG_V1 = {
 let jsonataFactory = null;
 let yamlApi = null;
 let lastDebugTrace = null;
+const liveLogClients = new Set();
 
 export default {
   async fetch(request, env, ctx) {
@@ -336,6 +366,14 @@ export default {
       }
       if (normalizedPath === `${ADMIN_ROOT}/assets/admin-page.js` && request.method === "GET") {
         return handleAdminPageScriptAsset();
+      }
+      if (normalizedPath === `${ADMIN_ROOT}/swagger` && request.method === "GET") {
+        await requireAdminAuth(request, env);
+        return handleAdminSwaggerPage(request);
+      }
+      if (normalizedPath === `${ADMIN_ROOT}/swagger/openapi.json` && request.method === "GET") {
+        await requireAdminAuth(request, env);
+        return handleAdminSwaggerSpec(request);
       }
       if (normalizedPath === `${ADMIN_ROOT}/access-token` && request.method === "POST") {
         await requireAdminKey(request, env);
@@ -421,6 +459,10 @@ export default {
         await requireAdminAuth(request, env);
         return await handleDebugLastGet(request);
       }
+      if (normalizedPath === `${ADMIN_ROOT}/live-log/stream` && request.method === "GET") {
+        await requireAdminAuth(request, env);
+        return await handleLiveLogStream(env);
+      }
       if (normalizedPath === `${ADMIN_ROOT}/debug/loggingSecret` && request.method === "PUT") {
         await requireAdminAuth(request, env);
         return await handleDebugLoggingSecretPut(request, env);
@@ -432,6 +474,14 @@ export default {
       if (normalizedPath === `${ADMIN_ROOT}/debug/loggingSecret` && request.method === "DELETE") {
         await requireAdminAuth(request, env);
         return await handleDebugLoggingSecretDelete(env);
+      }
+      if (normalizedPath.startsWith(`${ADMIN_ROOT}/http-auth/`)) {
+        await requireAdminAuth(request, env);
+        return await handleHttpAuthSecretRoute(normalizedPath, request, env);
+      }
+      if (normalizedPath.startsWith(`${ADMIN_ROOT}/http-secrets/`)) {
+        await requireAdminAuth(request, env);
+        return await handleHttpSecretRoute(normalizedPath, request, env);
       }
       if (normalizedPath === `${ADMIN_ROOT}/headers` && request.method === "GET") {
         await requireAdminAuth(request, env);
@@ -454,6 +504,9 @@ export default {
     }
   },
 };
+
+// Expose config validator for local tooling (not used by Worker runtime).
+export { validateAndNormalizeConfigV1 };
 
 class HttpError extends Error {
   constructor(status, code, message, details = null) {
@@ -583,12 +636,176 @@ function isNonArrayObject(v) {
 function normalizeHeaderName(name) {
   return String(name || "").trim().toLowerCase();
 }
+function authProfilePrefix(name) {
+  const key = String(name || "").trim();
+  return AUTH_PROFILE_PREFIXES[key] || null;
+}
+function authProfileKvKey(profile, field) {
+  const prefix = authProfilePrefix(profile);
+  if (!prefix) return null;
+  return `${prefix}/${field}`;
+}
+function isValidHttpSecretRef(ref) {
+  return /^[a-zA-Z0-9_.-]{1,64}$/.test(String(ref || ""));
+}
+function httpSecretKvKey(ref) {
+  const key = String(ref || "").trim();
+  if (!isValidHttpSecretRef(key)) return null;
+  return `${KV_HTTP_SECRET_PREFIX}${key}`;
+}
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function scopedKvKey(scope, leaf) {
+  const s = String(scope || "").trim();
+  const l = String(leaf || "").trim();
+  if (!s || !l) return null;
+  if (!/^[a-zA-Z0-9_.-]{1,64}$/.test(s) || !/^[a-zA-Z0-9_.-]{1,64}$/.test(l)) return null;
+  return `${s}/${l}`;
+}
+function collectScopedPlaceholders(input) {
+  const text = String(input || "");
+  const pattern = /\$\{([a-zA-Z0-9_.-]{1,64})\}/g;
+  const out = new Set();
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    if (match[1]) out.add(match[1]);
+  }
+  return [...out];
+}
+async function getOrCreateScopedKvValue(env, scope, leaf) {
+  const key = scopedKvKey(scope, leaf);
+  if (!key) return "";
+  const existing = await kvGetValue(env, key);
+  if (existing !== null && existing !== undefined) return String(existing);
+  await kvPutValue(env, key, "");
+  return "";
+}
+async function substituteScopedPlaceholders(value, scope, env) {
+  const raw = String(value ?? "");
+  const leaves = collectScopedPlaceholders(raw);
+  if (!leaves.length) return raw;
+  let out = raw;
+  for (const leaf of leaves) {
+    const kvValue = await getOrCreateScopedKvValue(env, scope, leaf);
+    out = out.split(`\${${leaf}}`).join(kvValue);
+  }
+  return out;
+}
+function getPathValue(obj, path) {
+  const p = String(path || "").trim();
+  if (!p) return null;
+  const parts = p.split(".");
+  let cur = obj;
+  for (const part of parts) {
+    if (!part) continue;
+    if (!isNonArrayObject(cur) && !Array.isArray(cur)) return null;
+    if (!(part in cur)) return null;
+    cur = cur[part];
+  }
+  return cur;
+}
+function formatIso(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  try {
+    return new Date(n).toISOString();
+  } catch {
+    return "";
+  }
+}
 function resolveCustomHook(name) {
   const key = String(name || "").trim();
   if (!key) return null;
   const fn = PREPROCESSORS?.[key];
   return typeof fn === "function" ? fn : null;
 }
+function normalizeHttpAuthorizationConfig(input, path, problems) {
+  if (input === undefined || input === null) return null;
+  if (!isNonArrayObject(input)) {
+    pushProblem(problems, path, "must be an object or null");
+    return null;
+  }
+  const typeRaw = input.type === undefined || input.type === null ? "static" : String(input.type || "").trim();
+  const type = typeRaw || "static";
+  if (!new Set(["static", "key_rotation"]).has(type)) {
+    pushProblem(problems, `${path}.type`, "must be static or key_rotation");
+  }
+  if (type === "static") {
+    const staticIn = input.static ?? {};
+    if (!isNonArrayObject(staticIn)) {
+      pushProblem(problems, `${path}.static`, "must be an object");
+      return { type: "static", headers: {}, secret_ref: null };
+    }
+    const headersIn = staticIn.headers ?? staticIn.auth_headers ?? input.auth_headers ?? {};
+    if (!isNonArrayObject(headersIn)) {
+      pushProblem(problems, `${path}.static.headers`, "must be an object");
+      return { type: "static", headers: {}, secret_ref: null };
+    }
+    const headers = {};
+    for (const [k, v] of Object.entries(headersIn)) {
+      const name = String(k || "").trim();
+      if (!name) continue;
+      headers[name] = String(v ?? "");
+    }
+    const secretRefRaw = staticIn.secret_ref === undefined || staticIn.secret_ref === null ? null : String(staticIn.secret_ref || "").trim();
+    const secret_ref = secretRefRaw || null;
+    if (secret_ref && !isValidHttpSecretRef(secret_ref)) {
+      pushProblem(problems, `${path}.static.secret_ref`, "must match [a-zA-Z0-9_.-] and be <= 64 chars");
+    }
+    return { type: "static", headers, secret_ref };
+  }
+  const rotationIn = input.key_rotation ?? {};
+  const defaultScope = path.startsWith("$.jwt")
+    ? "jwt"
+    : (path.startsWith("$.debug") ? "logging" : (path.includes("targetCredentialRotation") ? "target" : null));
+  if (!isNonArrayObject(rotationIn)) {
+    pushProblem(problems, `${path}.key_rotation`, "must be an object");
+    return { type: "key_rotation", profile: null, auth_headers: {}, key_rotation_http_request: null, key_rotation_http_response: {} };
+  }
+  const profileRaw = rotationIn.profile === undefined || rotationIn.profile === null ? "" : String(rotationIn.profile || "").trim();
+  const authHeadersIn = input.auth_headers ?? {};
+  const auth_headers = {};
+  if (isNonArrayObject(authHeadersIn)) {
+    for (const [k, v] of Object.entries(authHeadersIn)) {
+      const name = String(k || "").trim();
+      if (!name) continue;
+      auth_headers[name] = String(v ?? "");
+    }
+  } else if (input.auth_headers !== undefined) {
+    pushProblem(problems, `${path}.auth_headers`, "must be an object");
+  }
+  const key_rotation_http_request = normalizeHttpRequestConfig(
+    isNonArrayObject(rotationIn.key_rotation_http_request)
+      ? { ...rotationIn.key_rotation_http_request, __kv_scope: rotationIn.key_rotation_http_request.__kv_scope || defaultScope }
+      : (rotationIn.key_rotation_http_request ?? null),
+    `${path}.key_rotation.key_rotation_http_request`,
+    problems,
+    false
+  );
+  const keyRotationHttpResponseIn = rotationIn.key_rotation_http_response ?? {};
+  const key_rotation_http_response = {};
+  if (isNonArrayObject(keyRotationHttpResponseIn)) {
+    for (const [k, v] of Object.entries(keyRotationHttpResponseIn)) {
+      const name = String(k || "").trim();
+      if (!name) continue;
+      key_rotation_http_response[name] = String(v ?? "");
+    }
+  } else if (rotationIn.key_rotation_http_response !== undefined) {
+    pushProblem(problems, `${path}.key_rotation.key_rotation_http_response`, "must be an object");
+  }
+  if (!profileRaw && !key_rotation_http_request && Object.keys(key_rotation_http_response).length === 0) {
+    pushProblem(problems, `${path}.key_rotation`, "must define profile or key_rotation_http_request/key_rotation_http_response");
+  }
+  return {
+    type: "key_rotation",
+    profile: profileRaw || null,
+    auth_headers,
+    key_rotation_http_request,
+    key_rotation_http_response,
+  };
+}
+
 function normalizeHttpRequestConfig(input, path, problems, requireUrl) {
   if (input === undefined || input === null) return null;
   if (!isNonArrayObject(input)) {
@@ -624,12 +841,34 @@ function normalizeHttpRequestConfig(input, path, problems, requireUrl) {
       }
     }
   }
-  const body = input.body !== undefined ? input.body : null;
+  let body = input.body !== undefined ? input.body : null;
+  const bodyTypeAlias = input.body_type === undefined || input.body_type === null ? "" : String(input.body_type || "").trim().toLowerCase();
+  if (bodyTypeAlias) {
+    if (bodyTypeAlias === "none") {
+      body = { type: "none" };
+    } else if (bodyTypeAlias === "json") {
+      body = { type: "json", value: isNonArrayObject(input.body) || Array.isArray(input.body) ? input.body : (input.body ?? {}) };
+    } else if (bodyTypeAlias === "urlencoded") {
+      body = { type: "urlencoded", value: isNonArrayObject(input.body) ? input.body : {} };
+    } else if (bodyTypeAlias === "raw") {
+      body = { type: "raw", raw: typeof input.body === "string" ? input.body : String(input.body ?? "") };
+    }
+  }
+  const authProfileRaw = input.auth_profile === undefined || input.auth_profile === null ? null : String(input.auth_profile || "").trim();
+  const legacyProfile = authProfileRaw || null;
+  const authInput = input.http_authorization !== undefined ? input.http_authorization : input.authorization;
+  let http_authorization = normalizeHttpAuthorizationConfig(authInput, path + ".http_authorization", problems);
+  if (!http_authorization && legacyProfile) {
+    http_authorization = { type: "key_rotation", profile: legacyProfile };
+  }
   return {
     method,
     url: urlRaw || null,
     headers,
     body,
+    http_authorization,
+    auth_profile: legacyProfile || null,
+    __kv_scope: typeof input.__kv_scope === "string" ? String(input.__kv_scope).trim() : null,
   };
 }
 
@@ -721,9 +960,221 @@ function assertJwtClaims(payload, cfg) {
 
 let JWKS_CACHE = { url: "", fetchedAt: 0, keys: [] };
 
-function buildHttpRequestInit(req) {
+async function resolveAuthProfileHeaders(profileName, config, env) {
+  const name = String(profileName || "").trim();
+  if (!name) return {};
+  const profiles = isNonArrayObject(config?.http_auth?.profiles) ? config.http_auth.profiles : {};
+  const profile = isNonArrayObject(profiles?.[name]) ? profiles[name] : null;
+  if (!profile) return {};
+  const headers = isNonArrayObject(profile.headers) ? profile.headers : {};
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    const key = String(k || "").trim();
+    if (!key) continue;
+    out[key] = String(v ?? "");
+  }
+  const tsFormat = profile.timestamp_format || "epoch_ms";
+  return substituteAuthPlaceholders(out, name, env, tsFormat);
+}
+
+async function getAuthProfileState(profile, env) {
+  const prefix = authProfilePrefix(profile);
+  if (!prefix) return {};
+  const keys = AUTH_PROFILE_FIELDS.map((field) => authProfileKvKey(profile, field));
+  const values = await Promise.all(keys.map((key) => (key ? kvGetValue(env, key) : Promise.resolve(null))));
+  const state = {};
+  AUTH_PROFILE_FIELDS.forEach((field, idx) => {
+    state[field] = values[idx] ?? "";
+  });
+  return state;
+}
+
+function formatTimestamp(ms, format) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  if (format === "epoch_seconds") return String(Math.floor(n / 1000));
+  if (format === "iso_8601") return formatIso(n);
+  return String(n);
+}
+
+async function substituteAuthPlaceholders(headers, profileName, env, tsFormat) {
+  const out = { ...headers };
+  const state = await getAuthProfileState(profileName, env);
+  const format = tsFormat || "epoch_ms";
+  const map = {
+    "{{current}}": String(state.current || ""),
+    "{{secondary}}": String(state.secondary || ""),
+    "{{issued_at_ms}}": String(state.issued_at_ms || ""),
+    "{{expires_at_ms}}": String(state.expires_at_ms || ""),
+    "{{secondary_issued_at_ms}}": String(state.secondary_issued_at_ms || ""),
+    "{{secondary_expires_at_ms}}": String(state.secondary_expires_at_ms || ""),
+    "{{issued_at_iso}}": formatIso(state.issued_at_ms),
+    "{{expires_at_iso}}": formatIso(state.expires_at_ms),
+    "{{secondary_issued_at_iso}}": formatIso(state.secondary_issued_at_ms),
+    "{{secondary_expires_at_iso}}": formatIso(state.secondary_expires_at_ms),
+    "{{issued_at}}": formatTimestamp(state.issued_at_ms, format),
+    "{{expires_at}}": formatTimestamp(state.expires_at_ms, format),
+    "{{secondary_issued_at}}": formatTimestamp(state.secondary_issued_at_ms, format),
+    "{{secondary_expires_at}}": formatTimestamp(state.secondary_expires_at_ms, format),
+  };
+  for (const [name, value] of Object.entries(out)) {
+    let next = String(value ?? "");
+    for (const [token, tokenValue] of Object.entries(map)) {
+      if (next.includes(token)) {
+        next = next.split(token).join(tokenValue);
+      }
+    }
+    out[name] = next;
+  }
+  return out;
+}
+
+async function resolveStaticAuthHeaders(authConfig, env) {
+  const out = {};
+  const source = isNonArrayObject(authConfig?.headers) ? authConfig.headers : {};
+  for (const [k, v] of Object.entries(source)) {
+    const key = String(k || "").trim();
+    if (!key) continue;
+    out[key] = String(v ?? "");
+  }
+  const secretRef = String(authConfig?.secret_ref || "").trim();
+  if (!secretRef) return out;
+  const secretKvKey = httpSecretKvKey(secretRef);
+  if (!secretKvKey) {
+    throw new HttpError(400, "INVALID_CONFIG", "http_authorization.static.secret_ref is invalid");
+  }
+  const secretValue = await kvGetValue(env, secretKvKey);
+  if (!secretValue) {
+    throw new HttpError(503, "MISSING_HTTP_AUTH_SECRET", "Referenced static auth secret is not set in KV", {
+      secret_ref: secretRef,
+    });
+  }
+  const patternCurly = new RegExp(`{{\\s*${escapeRegExp(secretRef)}\\s*}}`, "g");
+  const patternDollar = new RegExp(`\\$\\{\\s*${escapeRegExp(secretRef)}\\s*\\}`, "g");
+  for (const [name, value] of Object.entries(out)) {
+    out[name] = String(value).replace(patternCurly, secretValue).replace(patternDollar, secretValue);
+  }
+  return out;
+}
+
+async function buildHttpRequestInitFromModel(reqModel, scope, env) {
+  const method = String(reqModel?.method || "GET").toUpperCase();
+  const headers = new Headers();
+  const headerMap = isNonArrayObject(reqModel?.headers) ? reqModel.headers : {};
+  for (const [k, v] of Object.entries(headerMap)) {
+    const name = String(k || "").trim();
+    if (!name) continue;
+    headers.set(name, await substituteScopedPlaceholders(String(v ?? ""), scope, env));
+  }
+  let body;
+  if (method !== "GET" && method !== "HEAD") {
+    const b = isNonArrayObject(reqModel?.body) ? reqModel.body : { type: "none" };
+    const bodyType = String(b.type || "none").toLowerCase();
+    if (bodyType === "json") {
+      if (!headers.has("content-type")) headers.set("content-type", "application/json");
+      const rawValue = b.value ?? {};
+      body = await substituteScopedPlaceholders(JSON.stringify(rawValue), scope, env);
+    } else if (bodyType === "urlencoded") {
+      if (!headers.has("content-type")) headers.set("content-type", "application/x-www-form-urlencoded");
+      const params = new URLSearchParams();
+      const source = isPlainObject(b.value) ? b.value : {};
+      for (const [k, v] of Object.entries(source)) params.append(k, await substituteScopedPlaceholders(String(v ?? ""), scope, env));
+      body = params.toString();
+    } else if (bodyType === "raw") {
+      if (typeof b.content_type === "string" && b.content_type) headers.set("content-type", b.content_type);
+      body = await substituteScopedPlaceholders(typeof b.raw === "string" ? b.raw : "", scope, env);
+    }
+  }
+  return { method, headers, body };
+}
+
+async function maybeRunKeyRotation(authConfig, scope, env) {
+  const mapping = isNonArrayObject(authConfig?.key_rotation_http_response) ? authConfig.key_rotation_http_response : {};
+  const reqModel = isNonArrayObject(authConfig?.key_rotation_http_request) ? authConfig.key_rotation_http_request : null;
+  if (!scope || !reqModel || Object.keys(mapping).length === 0) return;
+  const authHeaders = isNonArrayObject(authConfig?.auth_headers) ? authConfig.auth_headers : {};
+  const leaves = new Set();
+  Object.values(authHeaders).forEach((v) => collectScopedPlaceholders(v).forEach((leaf) => leaves.add(leaf)));
+  let needsRefresh = false;
+  for (const leaf of leaves) {
+    const value = await getOrCreateScopedKvValue(env, scope, leaf);
+    if (!String(value || "").trim()) needsRefresh = true;
+  }
+  if (!needsRefresh) return;
+  const url = String(reqModel?.url || "").trim();
+  if (!url) return;
+  const init = await buildHttpRequestInitFromModel(reqModel, scope, env);
+  let res;
+  try {
+    res = await fetch(url, init);
+  } catch {
+    throw new HttpError(502, "UPSTREAM_FETCH_FAILED", "Key rotation request failed");
+  }
+  if (!res.ok) {
+    throw new HttpError(502, "UPSTREAM_FETCH_FAILED", "Key rotation request returned non-2xx", { status: res.status });
+  }
+  let parsed;
+  try {
+    parsed = await res.json();
+  } catch {
+    throw new HttpError(422, "NON_JSON_RESPONSE", "Key rotation response must be JSON");
+  }
+  for (const [leafRaw, sourceRaw] of Object.entries(mapping)) {
+    const leaf = String(leafRaw || "").trim();
+    const source = String(sourceRaw || "").trim();
+    if (!leaf || !source) continue;
+    const key = scopedKvKey(scope, leaf);
+    if (!key) continue;
+    if (leaf === "current_token_ttl_unit") {
+      await kvPutValue(env, key, source);
+      continue;
+    }
+    const extracted = getPathValue(parsed, source);
+    if (extracted === null || extracted === undefined) continue;
+    await kvPutValue(env, key, String(extracted));
+  }
+}
+
+async function resolveKeyRotationAuthHeaders(authConfig, scope, env) {
+  if (!scope) return {};
+  await maybeRunKeyRotation(authConfig, scope, env);
+  const authHeaders = isNonArrayObject(authConfig?.auth_headers) ? authConfig.auth_headers : {};
+  const out = {};
+  for (const [k, v] of Object.entries(authHeaders)) {
+    const name = String(k || "").trim();
+    if (!name) continue;
+    out[name] = await substituteScopedPlaceholders(String(v ?? ""), scope, env);
+  }
+  return out;
+}
+
+async function buildHttpRequestInit(req, config, env) {
   const method = String(req?.method || "GET").toUpperCase();
   const headers = new Headers();
+  const authConfig = req?.http_authorization;
+  if (authConfig && authConfig.type === "static") {
+    const staticHeaders = authConfig.secret_ref
+      ? await resolveStaticAuthHeaders(authConfig, env)
+      : await resolveKeyRotationAuthHeaders({ auth_headers: authConfig.headers || {} }, String(req?.__kv_scope || "").trim(), env);
+    for (const [k, v] of Object.entries(staticHeaders)) {
+      headers.set(k, String(v ?? ""));
+    }
+  } else if (authConfig && authConfig.type === "key_rotation" && authConfig.profile) {
+    const authHeaders = await resolveAuthProfileHeaders(authConfig.profile, config, env);
+    for (const [k, v] of Object.entries(authHeaders)) {
+      headers.set(k, String(v ?? ""));
+    }
+  } else if (authConfig && authConfig.type === "key_rotation") {
+    const authHeaders = await resolveKeyRotationAuthHeaders(authConfig, String(req?.__kv_scope || "").trim(), env);
+    for (const [k, v] of Object.entries(authHeaders)) {
+      headers.set(k, String(v ?? ""));
+    }
+  } else if (req?.auth_profile) {
+    const authHeaders = await resolveAuthProfileHeaders(req.auth_profile, config, env);
+    for (const [k, v] of Object.entries(authHeaders)) {
+      headers.set(k, String(v ?? ""));
+    }
+  }
   if (isNonArrayObject(req?.headers)) {
     for (const [k, v] of Object.entries(req.headers)) {
       headers.set(k, String(v ?? ""));
@@ -756,7 +1207,7 @@ function buildHttpRequestInit(req) {
   return { method, headers, body };
 }
 
-async function fetchJwks(requestConfig) {
+async function fetchJwks(requestConfig, config, env) {
   const url = String(requestConfig?.url || "").trim();
   if (!url) {
     throw new HttpError(401, "JWT_INVALID", "JWKS request URL is required");
@@ -769,7 +1220,7 @@ async function fetchJwks(requestConfig) {
   const timeout = setTimeout(() => controller.abort(), 5000);
   let res;
   try {
-    const init = buildHttpRequestInit(requestConfig);
+    const init = await buildHttpRequestInit(requestConfig, config, env);
     res = await fetch(url, { ...init, signal: controller.signal });
   } catch (e) {
     throw new HttpError(502, "JWKS_FETCH_FAILED", "Failed to fetch JWKS");
@@ -798,13 +1249,13 @@ async function verifyJwtHs256(token, secret, cfg) {
   return payload;
 }
 
-async function verifyJwtRs256(token, cfg) {
+async function verifyJwtRs256(token, cfg, config, env) {
   const { header, payload, signature, signingInput } = parseJwtToken(token);
   if (String(header.alg || "").toUpperCase() !== "RS256") {
     throw new HttpError(401, "JWT_INVALID", "JWT alg must be RS256");
   }
   const jwksRequest = cfg?.http_request;
-  const keys = await fetchJwks(jwksRequest);
+  const keys = await fetchJwks(jwksRequest, config, env);
   if (!keys.length) throw new HttpError(401, "JWT_INVALID", "JWKS contains no keys");
   const kid = header.kid;
   let jwk = null;
@@ -1038,7 +1489,7 @@ function validateAndNormalizeConfigV1(configInput) {
 
   ensureNoUnknownKeys(
     input,
-    new Set(["targetHost", "proxyName", "jwt", "apiKeyPolicy", "targetCredentialRotation", "debug", "transform", "header_forwarding"]),
+    new Set(["targetHost", "proxyName", "http_auth", "jwt", "apiKeyPolicy", "targetCredentialRotation", "debug", "transform", "header_forwarding"]),
     "$",
     problems
   );
@@ -1065,12 +1516,65 @@ function validateAndNormalizeConfigV1(configInput) {
     }
   }
 
+  const httpAuthIn = input.http_auth ?? {};
+  if (!isNonArrayObject(httpAuthIn)) {
+    pushProblem(problems, "$.http_auth", "must be an object when provided");
+  }
+  if (isNonArrayObject(httpAuthIn)) {
+    ensureNoUnknownKeys(httpAuthIn, new Set(["profiles"]), "$.http_auth", problems);
+  }
+  const profilesIn = isNonArrayObject(httpAuthIn) ? httpAuthIn.profiles ?? {} : {};
+  if (!isNonArrayObject(profilesIn)) {
+    pushProblem(problems, "$.http_auth.profiles", "must be an object when provided");
+  }
+  const httpAuthProfiles = {};
+  if (isNonArrayObject(profilesIn)) {
+    for (const [nameRaw, profileRaw] of Object.entries(profilesIn)) {
+      const name = String(nameRaw || "").trim();
+      if (!name) {
+        pushProblem(problems, "$.http_auth.profiles", "profile names must be non-empty strings");
+        continue;
+      }
+      if (!authProfilePrefix(name)) {
+        pushProblem(problems, `$.http_auth.profiles.${name}`, "profile name is not supported");
+        continue;
+      }
+      if (!isNonArrayObject(profileRaw)) {
+        pushProblem(problems, `$.http_auth.profiles.${name}`, "must be an object");
+        continue;
+      }
+      ensureNoUnknownKeys(profileRaw, new Set(["headers", "timestamp_format"]), `$.http_auth.profiles.${name}`, problems);
+      const headersIn = profileRaw.headers ?? {};
+      if (!isNonArrayObject(headersIn)) {
+        pushProblem(problems, `$.http_auth.profiles.${name}.headers`, "must be an object");
+        continue;
+      }
+      const headers = {};
+      for (const [k, v] of Object.entries(headersIn)) {
+        const headerName = String(k || "").trim();
+        if (!headerName) continue;
+        headers[headerName] = String(v ?? "");
+      }
+      const tsFormatRaw = profileRaw.timestamp_format;
+      const tsFormat = tsFormatRaw === undefined || tsFormatRaw === null ? "epoch_ms" : String(tsFormatRaw || "").trim();
+      if (!new Set(["epoch_ms", "epoch_seconds", "iso_8601"]).has(tsFormat)) {
+        pushProblem(problems, `$.http_auth.profiles.${name}.timestamp_format`, "must be epoch_ms, epoch_seconds, or iso_8601");
+      }
+      httpAuthProfiles[name] = { headers, timestamp_format: tsFormat };
+    }
+  }
+
   const jwtIn = input.jwt ?? {};
   if (!isNonArrayObject(jwtIn)) {
     pushProblem(problems, "$.jwt", "must be an object when provided");
   }
   if (isNonArrayObject(jwtIn)) {
-    ensureNoUnknownKeys(jwtIn, new Set(["enabled", "inbound", "outbound"]), "$.jwt", problems);
+    ensureNoUnknownKeys(
+      jwtIn,
+      new Set(["enabled", "inbound", "outbound", "http_request", "authorization", "header", "scheme", "issuer", "audience", "clock_skew_seconds"]),
+      "$.jwt",
+      problems
+    );
   }
   const jwtEnabled = isNonArrayObject(jwtIn) && jwtIn.enabled !== undefined ? jwtIn.enabled : false;
   if (typeof jwtEnabled !== "boolean") {
@@ -1105,12 +1609,26 @@ function validateAndNormalizeConfigV1(configInput) {
     jwtInboundSchemeRaw === undefined || jwtInboundSchemeRaw === null ? "Bearer" : String(jwtInboundSchemeRaw || "").trim();
   const jwtInboundIssuer = jwtInboundIn.issuer === undefined || jwtInboundIn.issuer === null ? null : String(jwtInboundIn.issuer || "").trim();
   const jwtInboundAudience = jwtInboundIn.audience === undefined || jwtInboundIn.audience === null ? null : String(jwtInboundIn.audience || "").trim();
-  const jwtInboundHttpRequest = normalizeHttpRequestConfig(
-    isNonArrayObject(jwtInboundIn) ? jwtInboundIn.http_request : null,
+  let jwtInboundHttpRequest = normalizeHttpRequestConfig(
+    isNonArrayObject(jwtInboundIn) && isNonArrayObject(jwtInboundIn.http_request)
+      ? { ...jwtInboundIn.http_request, __kv_scope: "jwt" }
+      : (isNonArrayObject(jwtInboundIn) ? jwtInboundIn.http_request : null),
     "$.jwt.inbound.http_request",
     problems,
     jwtInboundMode === "jwks" && jwtInboundEnabled
   );
+  if (isNonArrayObject(jwtIn) && (jwtIn.http_request !== undefined || jwtIn.authorization !== undefined)) {
+    const rootJwtRequest = isNonArrayObject(jwtIn.http_request) ? { ...jwtIn.http_request, __kv_scope: "jwt" } : {};
+    if (jwtIn.authorization !== undefined) {
+      rootJwtRequest.authorization = jwtIn.authorization;
+    }
+    jwtInboundHttpRequest = normalizeHttpRequestConfig(
+      rootJwtRequest,
+      "$.jwt.http_request",
+      problems,
+      false
+    );
+  }
   const jwtInboundSkewRaw = jwtInboundIn.clock_skew_seconds;
   const jwtInboundSkew = jwtInboundSkewRaw === undefined || jwtInboundSkewRaw === null ? 0 : Number(jwtInboundSkewRaw);
   if (!Number.isInteger(jwtInboundSkew) || jwtInboundSkew < 0) {
@@ -1189,8 +1707,8 @@ function validateAndNormalizeConfigV1(configInput) {
   if (!new Set(["json_ttl", "oauth_client_credentials"]).has(tcrStrategy)) {
     pushProblem(problems, "$.targetCredentialRotation.strategy", "must be json_ttl or oauth_client_credentials");
   }
-  const tcrRequest = isNonArrayObject(tcrIn) && tcrIn.request !== undefined ? tcrIn.request : DEFAULT_CONFIG_V1.targetCredentialRotation.request;
-  if (!isNonArrayObject(tcrRequest)) pushProblem(problems, "$.targetCredentialRotation.request", "must be an object");
+  const tcrRequestRaw = isNonArrayObject(tcrIn) && tcrIn.request !== undefined ? tcrIn.request : DEFAULT_CONFIG_V1.targetCredentialRotation.request;
+  if (!isNonArrayObject(tcrRequestRaw)) pushProblem(problems, "$.targetCredentialRotation.request", "must be an object");
   const tcrResponseIn = isNonArrayObject(tcrIn) && tcrIn.response !== undefined ? tcrIn.response : {};
   if (!isNonArrayObject(tcrResponseIn)) pushProblem(problems, "$.targetCredentialRotation.response", "must be an object");
   const tcrKeyPath = isNonArrayObject(tcrResponseIn) && tcrResponseIn.key_path !== undefined ? String(tcrResponseIn.key_path || "") : "data.apiKey";
@@ -1331,11 +1849,38 @@ function validateAndNormalizeConfigV1(configInput) {
     ensureNoUnknownKeys(loggingUrlIn, new Set(["http_request"]), "$.debug.loggingEndpoint", problems);
   }
   const sinkHttpRequest = normalizeHttpRequestConfig(
-    isNonArrayObject(loggingUrlIn) ? loggingUrlIn.http_request : null,
+    isNonArrayObject(loggingUrlIn) && isNonArrayObject(loggingUrlIn.http_request)
+      ? { ...loggingUrlIn.http_request, __kv_scope: "logging" }
+      : (isNonArrayObject(loggingUrlIn) ? loggingUrlIn.http_request : null),
     "$.debug.loggingEndpoint.http_request",
     problems,
     false
   );
+
+  const tcrRequest = normalizeHttpRequestConfig(
+    isNonArrayObject(tcrRequestRaw) ? { ...tcrRequestRaw, __kv_scope: "target" } : null,
+    "$.targetCredentialRotation.request",
+    problems,
+    false
+  );
+
+  function checkAuthProfileRef(requestObj, path) {
+    const profile =
+      (requestObj?.http_authorization?.type === "key_rotation" && requestObj?.http_authorization?.profile) ||
+      requestObj?.auth_profile ||
+      null;
+    if (!profile) return;
+    if (!authProfilePrefix(profile)) {
+      pushProblem(problems, `${path}.http_authorization.key_rotation.profile`, "profile name is not supported");
+      return;
+    }
+    if (!httpAuthProfiles[profile]) {
+      pushProblem(problems, `${path}.http_authorization.key_rotation.profile`, "must reference a defined http_auth profile");
+    }
+  }
+  checkAuthProfileRef(jwtInboundHttpRequest, "$.jwt.inbound.http_request");
+  checkAuthProfileRef(sinkHttpRequest, "$.debug.loggingEndpoint.http_request");
+  checkAuthProfileRef(tcrRequest, "$.targetCredentialRotation.request");
 
   const headerForwardingIn = input.header_forwarding ?? {};
   if (!isNonArrayObject(headerForwardingIn)) {
@@ -1381,6 +1926,9 @@ function validateAndNormalizeConfigV1(configInput) {
   return {
     targetHost,
     proxyName,
+    http_auth: {
+      profiles: httpAuthProfiles,
+    },
     jwt: {
       enabled: !!jwtEnabled,
       inbound: {
@@ -1411,7 +1959,7 @@ function validateAndNormalizeConfigV1(configInput) {
     targetCredentialRotation: {
       enabled: !!tcrEnabled,
       strategy: tcrStrategy,
-      request: isNonArrayObject(tcrRequest) ? tcrRequest : DEFAULT_CONFIG_V1.targetCredentialRotation.request,
+      request: tcrRequest || DEFAULT_CONFIG_V1.targetCredentialRotation.request,
       response: {
         key_path: tcrKeyPath,
         ttl_path: tcrTtlPath,
@@ -1887,6 +2435,10 @@ function validateInvokePayload(payload, { allowMissingUrl = false } = {}) {
 
   if (upstream.headers !== undefined && !isPlainObject(upstream.headers)) {
     problems.push("upstream.headers must be an object when provided");
+  }
+
+  if (upstream.auth_profile !== undefined && typeof upstream.auth_profile !== "string") {
+    problems.push("upstream.auth_profile must be a string when provided");
   }
 
   if (upstream.body !== undefined) {
@@ -3042,17 +3594,9 @@ async function pushDebugTraceToLoggingUrl(traceText, traceData, config, env) {
   const req = isNonArrayObject(sink?.http_request) ? sink.http_request : null;
   const url = String(req?.url || "").trim();
   if (!url) return { attempted: false, ok: true };
-  const init = buildHttpRequestInit({ ...req, method: req?.method || "POST" });
-  const secret = await kvGetValue(env, KV_DEBUG_LOGGING_SECRET);
+  const init = await buildHttpRequestInit({ ...req, method: req?.method || "POST" }, config, env);
   const headers = new Headers(init.headers || {});
   if (!headers.has("content-type")) headers.set("content-type", "application/json");
-  if (secret) {
-    for (const [name, value] of headers.entries()) {
-      if (String(value || "").trim() === "{{logging_secret}}") {
-        headers.set(name, secret);
-      }
-    }
-  }
   try {
     const res = await fetch(url, {
       method: init.method || "POST",
@@ -3112,6 +3656,76 @@ async function handleDebugLastGet(request) {
   });
 }
 
+function encodeSseEvent(eventName, data) {
+  const payload = typeof data === "string" ? data : JSON.stringify(data ?? {});
+  const lines = String(payload)
+    .split("\n")
+    .map((line) => `data: ${line}`)
+    .join("\n");
+  return `event: ${eventName}\n${lines}\n\n`;
+}
+
+function broadcastLiveLogEvent(eventName, data) {
+  if (!liveLogClients.size) return;
+  const encoded = new TextEncoder().encode(encodeSseEvent(eventName, data));
+  for (const client of [...liveLogClients]) {
+    try {
+      client.controller.enqueue(encoded);
+    } catch {
+      liveLogClients.delete(client);
+      try {
+        if (client.heartbeat) clearInterval(client.heartbeat);
+      } catch {}
+      try {
+        client.controller.close();
+      } catch {}
+    }
+  }
+}
+
+async function handleLiveLogStream(env) {
+  const enabled = await isDebugEnabled(env);
+  if (!enabled) {
+    throw new HttpError(409, "LOGGING_DISABLED", "Live log is unavailable because logging is disabled.", {
+      hint: `Enable logging via PUT ${ADMIN_ROOT}/debug before opening live log.`,
+    });
+  }
+  const encoder = new TextEncoder();
+  let clientRef = null;
+  const stream = new ReadableStream({
+    start(controller) {
+      const heartbeat = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(": ping\n\n"));
+        } catch {}
+      }, 15000);
+      clientRef = { controller, heartbeat };
+      liveLogClients.add(clientRef);
+      controller.enqueue(encoder.encode(encodeSseEvent("connected", { timestamp: new Date().toISOString() })));
+      if (lastDebugTrace?.text) {
+        controller.enqueue(encoder.encode(encodeSseEvent("last_trace", lastDebugTrace)));
+      }
+    },
+    cancel() {
+      if (!clientRef) return;
+      liveLogClients.delete(clientRef);
+      try {
+        if (clientRef.heartbeat) clearInterval(clientRef.heartbeat);
+      } catch {}
+      clientRef = null;
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    },
+  });
+}
+
 async function handleDebugLoggingSecretPut(request, env) {
   enforceInvokeContentType(request);
   const body = await readJsonWithLimit(request, getEnvInt(env, "MAX_REQ_BYTES", DEFAULTS.MAX_REQ_BYTES));
@@ -3121,7 +3735,14 @@ async function handleDebugLoggingSecretPut(request, env) {
       expected: { value: "secret-string" },
     });
   }
-  await kvPutValue(env, KV_DEBUG_LOGGING_SECRET, value);
+  const key = authProfileKvKey("logging", "current");
+  const issuedKey = authProfileKvKey("logging", "issued_at_ms");
+  if (key) {
+    await Promise.all([
+      kvPutValue(env, key, value),
+      issuedKey ? kvStore(env).put(issuedKey, String(Date.now())) : Promise.resolve(),
+    ]);
+  }
   return jsonResponse(200, {
     ok: true,
     data: {
@@ -3132,7 +3753,8 @@ async function handleDebugLoggingSecretPut(request, env) {
 }
 
 async function handleDebugLoggingSecretGet(env) {
-  const secret = await kvGetValue(env, KV_DEBUG_LOGGING_SECRET);
+  const key = authProfileKvKey("logging", "current");
+  const secret = key ? await kvGetValue(env, key) : null;
   return jsonResponse(200, {
     ok: true,
     data: {
@@ -3143,11 +3765,177 @@ async function handleDebugLoggingSecretGet(env) {
 }
 
 async function handleDebugLoggingSecretDelete(env) {
-  await kvStore(env).delete(KV_DEBUG_LOGGING_SECRET);
+  const key = authProfileKvKey("logging", "current");
+  const issuedKey = authProfileKvKey("logging", "issued_at_ms");
+  const expiresKey = authProfileKvKey("logging", "expires_at_ms");
+  const secondaryKey = authProfileKvKey("logging", "secondary");
+  const secondaryIssuedKey = authProfileKvKey("logging", "secondary_issued_at_ms");
+  const secondaryExpiresKey = authProfileKvKey("logging", "secondary_expires_at_ms");
+  const deletes = [
+    key,
+    issuedKey,
+    expiresKey,
+    secondaryKey,
+    secondaryIssuedKey,
+    secondaryExpiresKey,
+  ].filter(Boolean).map((k) => kvStore(env).delete(k));
+  if (deletes.length) await Promise.all(deletes);
   return jsonResponse(200, {
     ok: true,
     data: {
       logging_secret_set: false,
+    },
+    meta: {},
+  });
+}
+
+function parseHttpAuthSecretPath(pathname) {
+  const base = `${ADMIN_ROOT}/http-auth/`;
+  if (!pathname.startsWith(base)) return null;
+  const rest = pathname.slice(base.length);
+  const parts = rest.split("/");
+  if (parts.length !== 2) return null;
+  if (parts[1] !== "secret") return null;
+  const profile = decodeURIComponent(parts[0] || "");
+  return profile || null;
+}
+
+async function handleHttpAuthSecretRoute(pathname, request, env) {
+  const profile = parseHttpAuthSecretPath(pathname);
+  if (!profile) {
+    throw new HttpError(404, "NOT_FOUND", "Route not found");
+  }
+  if (!authProfilePrefix(profile)) {
+    throw new HttpError(400, "INVALID_REQUEST", "Unsupported auth profile");
+  }
+  if (request.method === "PUT") return await handleHttpAuthSecretPut(profile, request, env);
+  if (request.method === "GET") return await handleHttpAuthSecretGet(profile, env);
+  if (request.method === "DELETE") return await handleHttpAuthSecretDelete(profile, env);
+  throw new HttpError(405, "METHOD_NOT_ALLOWED", "Method not allowed");
+}
+
+async function handleHttpAuthSecretPut(profile, request, env) {
+  enforceInvokeContentType(request);
+  const body = await readJsonWithLimit(request, getEnvInt(env, "MAX_REQ_BYTES", DEFAULTS.MAX_REQ_BYTES));
+  const value = String(body?.value || "").trim();
+  if (!value) {
+    throw new HttpError(400, "INVALID_REQUEST", "value is required", {
+      expected: { value: "secret-string" },
+    });
+  }
+  const key = authProfileKvKey(profile, "current");
+  const issuedKey = authProfileKvKey(profile, "issued_at_ms");
+  if (key) {
+    await Promise.all([
+      kvPutValue(env, key, value),
+      issuedKey ? kvStore(env).put(issuedKey, String(Date.now())) : Promise.resolve(),
+    ]);
+  }
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      profile,
+      secret_set: true,
+    },
+    meta: {},
+  });
+}
+
+async function handleHttpAuthSecretGet(profile, env) {
+  const key = authProfileKvKey(profile, "current");
+  const secret = key ? await kvGetValue(env, key) : null;
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      profile,
+      secret_set: !!secret,
+    },
+    meta: {},
+  });
+}
+
+async function handleHttpAuthSecretDelete(profile, env) {
+  const deletes = AUTH_PROFILE_FIELDS
+    .map((field) => authProfileKvKey(profile, field))
+    .filter(Boolean)
+    .map((key) => kvStore(env).delete(key));
+  if (deletes.length) await Promise.all(deletes);
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      profile,
+      secret_set: false,
+    },
+    meta: {},
+  });
+}
+
+function parseHttpSecretPath(pathname) {
+  const base = `${ADMIN_ROOT}/http-secrets/`;
+  if (!pathname.startsWith(base)) return null;
+  const rest = pathname.slice(base.length);
+  if (!rest || rest.includes("/")) return null;
+  const ref = decodeURIComponent(rest || "").trim();
+  if (!isValidHttpSecretRef(ref)) return null;
+  return ref;
+}
+
+async function handleHttpSecretRoute(pathname, request, env) {
+  const ref = parseHttpSecretPath(pathname);
+  if (!ref) {
+    throw new HttpError(404, "NOT_FOUND", "Route not found");
+  }
+  if (request.method === "PUT") return await handleHttpSecretPut(ref, request, env);
+  if (request.method === "GET") return await handleHttpSecretGet(ref, env);
+  if (request.method === "DELETE") return await handleHttpSecretDelete(ref, env);
+  throw new HttpError(405, "METHOD_NOT_ALLOWED", "Method not allowed");
+}
+
+async function handleHttpSecretPut(ref, request, env) {
+  enforceInvokeContentType(request);
+  const body = await readJsonWithLimit(request, getEnvInt(env, "MAX_REQ_BYTES", DEFAULTS.MAX_REQ_BYTES));
+  const value = String(body?.value || "").trim();
+  if (!value) {
+    throw new HttpError(400, "INVALID_REQUEST", "value is required", {
+      expected: { value: "secret-string" },
+    });
+  }
+  const key = httpSecretKvKey(ref);
+  if (!key) {
+    throw new HttpError(400, "INVALID_REQUEST", "Invalid secret reference");
+  }
+  await kvPutValue(env, key, value);
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      secret_ref: ref,
+      secret_set: true,
+    },
+    meta: {},
+  });
+}
+
+async function handleHttpSecretGet(ref, env) {
+  const key = httpSecretKvKey(ref);
+  const secret = key ? await kvGetValue(env, key) : null;
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      secret_ref: ref,
+      secret_set: !!secret,
+    },
+    meta: {},
+  });
+}
+
+async function handleHttpSecretDelete(ref, env) {
+  const key = httpSecretKvKey(ref);
+  if (key) await kvStore(env).delete(key);
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      secret_ref: ref,
+      secret_set: false,
     },
     meta: {},
   });
@@ -3161,6 +3949,219 @@ function handleAdminPageScriptAsset() {
   return new Response(renderAdminPageScript(), {
     headers: {
       "content-type": "application/javascript; charset=utf-8",
+      "cache-control": "no-store",
+    },
+  });
+}
+
+function buildOpenApiSpec(request) {
+  const url = new URL(request.url);
+  const serverUrl = `${url.protocol}//${url.host}`;
+  const jsonBody = {
+    content: {
+      "application/json": {
+        schema: { type: "object", additionalProperties: true },
+      },
+    },
+  };
+  return {
+    openapi: "3.0.3",
+    info: {
+      title: "API Transform Proxy",
+      version: "1.0.0",
+      description: "Cloudflare Worker relay + transform proxy API.",
+    },
+    servers: [{ url: serverUrl }],
+    components: {
+      securitySchemes: {
+        ProxyKeyHeader: { type: "apiKey", in: "header", name: "X-Proxy-Key" },
+        AdminKeyHeader: { type: "apiKey", in: "header", name: "X-Admin-Key" },
+        IssuerKeyHeader: { type: "apiKey", in: "header", name: "X-Issuer-Key" },
+        AdminBearer: { type: "http", scheme: "bearer" },
+      },
+      schemas: {
+        AnyObject: { type: "object", additionalProperties: true },
+      },
+    },
+    paths: {
+      "/_apiproxy": {
+        get: {
+          summary: "Bootstrap/status page",
+          responses: { "200": { description: "HTML status page" } },
+        },
+        post: {
+          summary: "Bootstrap keys (returns newly created keys only)",
+          security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }],
+          requestBody: jsonBody,
+          responses: { "200": { description: "Bootstrap result" } },
+        },
+      },
+      "/_apiproxy/request": {
+        post: {
+          summary: "Relay request to upstream target",
+          security: [{ ProxyKeyHeader: [] }],
+          requestBody: jsonBody,
+          responses: { "200": { description: "Relay envelope response" } },
+        },
+      },
+      "/_apiproxy/jwt": {
+        post: {
+          summary: "Issue JWT from proxy",
+          security: [{ IssuerKeyHeader: [] }],
+          requestBody: jsonBody,
+          responses: { "200": { description: "JWT issue response" } },
+        },
+      },
+      "/_apiproxy/keys/proxy/rotate": {
+        post: { summary: "Rotate proxy key (self)", security: [{ ProxyKeyHeader: [] }], responses: { "200": { description: "New key" } } },
+      },
+      "/_apiproxy/keys/issuer/rotate": {
+        post: { summary: "Rotate issuer key (self)", security: [{ IssuerKeyHeader: [] }], responses: { "200": { description: "New key" } } },
+      },
+      "/_apiproxy/keys/admin/rotate": {
+        post: { summary: "Rotate admin key", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "New key" } } },
+      },
+      "/_apiproxy/admin/access-token": {
+        post: {
+          summary: "Create short-lived admin access token",
+          security: [{ AdminKeyHeader: [] }],
+          responses: { "200": { description: "Access token response" } },
+        },
+      },
+      "/_apiproxy/admin/version": {
+        get: { summary: "Get version info", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "Version" } } },
+      },
+      "/_apiproxy/admin/keys": {
+        get: { summary: "Get key status", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "Key status" } } },
+      },
+      "/_apiproxy/admin/keys/proxy/rotate": {
+        post: { summary: "Rotate proxy key (admin)", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "New key" } } },
+      },
+      "/_apiproxy/admin/keys/issuer/rotate": {
+        post: { summary: "Rotate issuer key (admin)", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "New key" } } },
+      },
+      "/_apiproxy/admin/keys/admin/rotate": {
+        post: { summary: "Rotate admin key (admin)", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "New key" } } },
+      },
+      "/_apiproxy/admin/config": {
+        get: { summary: "Get YAML config", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "YAML config text" } } },
+        put: {
+          summary: "Save config (YAML or JSON)",
+          security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }],
+          requestBody: {
+            content: {
+              "text/yaml": { schema: { type: "string" } },
+              "application/json": { schema: { type: "object", additionalProperties: true } },
+            },
+          },
+          responses: { "200": { description: "Updated config" } },
+        },
+      },
+      "/_apiproxy/admin/config/validate": {
+        post: {
+          summary: "Validate config (YAML or JSON)",
+          security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }],
+          requestBody: {
+            content: {
+              "text/yaml": { schema: { type: "string" } },
+              "application/json": { schema: { type: "object", additionalProperties: true } },
+            },
+          },
+          responses: { "200": { description: "Validation result" } },
+        },
+      },
+      "/_apiproxy/admin/config/test-rule": {
+        post: { summary: "Test transform rule matcher", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], requestBody: jsonBody, responses: { "200": { description: "Rule test output" } } },
+      },
+      "/_apiproxy/admin/key-rotation-config": {
+        get: { summary: "Get outbound auth/rotation config", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "Rotation config" } } },
+        put: { summary: "Set outbound auth/rotation config", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], requestBody: jsonBody, responses: { "200": { description: "Updated" } } },
+      },
+      "/_apiproxy/admin/transform-config": {
+        get: { summary: "Get transform config", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "Transform config" } } },
+        put: { summary: "Set transform config", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], requestBody: jsonBody, responses: { "200": { description: "Updated" } } },
+      },
+      "/_apiproxy/admin/debug": {
+        get: { summary: "Get logging/debug status", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "Status" } } },
+        put: { summary: "Enable logging/debug", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], requestBody: jsonBody, responses: { "200": { description: "Enabled" } } },
+        delete: { summary: "Disable logging/debug", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "Disabled" } } },
+      },
+      "/_apiproxy/admin/debug/last": {
+        get: { summary: "Get last debug trace", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "Trace text/json/html" } } },
+      },
+      "/_apiproxy/admin/live-log/stream": {
+        get: {
+          summary: "Live debug stream (SSE)",
+          security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }],
+          responses: { "200": { description: "text/event-stream" }, "409": { description: "LOGGING_DISABLED" } },
+        },
+      },
+      "/_apiproxy/admin/debug/loggingSecret": {
+        get: { summary: "Get logging secret set status", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "Status" } } },
+        put: { summary: "Set logging secret", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], requestBody: jsonBody, responses: { "200": { description: "Saved" } } },
+        delete: { summary: "Delete logging secret", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "Deleted" } } },
+      },
+      "/_apiproxy/admin/http-auth/{profile}/secret": {
+        parameters: [{ name: "profile", in: "path", required: true, schema: { type: "string" } }],
+        get: { summary: "Get http_auth profile secret set status", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "Status" } } },
+        put: { summary: "Set http_auth profile secret", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], requestBody: jsonBody, responses: { "200": { description: "Saved" } } },
+        delete: { summary: "Delete http_auth profile secrets", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "Deleted" } } },
+      },
+      "/_apiproxy/admin/http-secrets/{ref}": {
+        parameters: [{ name: "ref", in: "path", required: true, schema: { type: "string" } }],
+        get: { summary: "Get HTTP secret set status", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "Status" } } },
+        put: { summary: "Set HTTP secret value", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], requestBody: jsonBody, responses: { "200": { description: "Saved" } } },
+        delete: { summary: "Delete HTTP secret", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "Deleted" } } },
+      },
+      "/_apiproxy/admin/headers": {
+        get: { summary: "List enrichments", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "Header names" } } },
+      },
+      "/_apiproxy/admin/headers/{headerName}": {
+        parameters: [{ name: "headerName", in: "path", required: true, schema: { type: "string" } }],
+        put: { summary: "Set enrichment header", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], requestBody: jsonBody, responses: { "200": { description: "Saved" } } },
+        delete: { summary: "Delete enrichment header", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "Deleted" } } },
+      },
+      "/_apiproxy/admin/swagger/openapi.json": {
+        get: { summary: "OpenAPI spec JSON", security: [{ AdminKeyHeader: [] }, { AdminBearer: [] }], responses: { "200": { description: "OpenAPI JSON" } } },
+      },
+    },
+  };
+}
+
+function handleAdminSwaggerSpec(request) {
+  return new Response(JSON.stringify(buildOpenApiSpec(request), null, 2), {
+    status: 200,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+    },
+  });
+}
+
+function handleAdminSwaggerPage(request) {
+  const specJson = JSON.stringify(buildOpenApiSpec(request)).replace(/</g, "\\u003c");
+  const body = `
+    <div style="padding:12px 0 14px 0;">
+      <p style="margin:0;color:#475569;">Admin-protected Swagger documentation</p>
+    </div>
+    <div id="swagger-ui"></div>
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script>
+      const __SPEC__ = ${specJson};
+      window.ui = SwaggerUIBundle({
+        spec: __SPEC__,
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        displayRequestDuration: true,
+        tryItOutEnabled: true,
+      });
+    </script>
+  `;
+  return new Response(htmlPage("Admin Swagger", body), {
+    status: 200,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
     },
   });
@@ -3519,7 +4520,7 @@ async function handleRequestCore(request, env, payload, ctx) {
   if (jwtConfig?.enabled && jwtConfig?.inbound?.enabled) {
     const token = extractJwtFromHeaders(request.headers, jwtConfig.inbound);
     if (jwtConfig.inbound.mode === "jwks") {
-      await verifyJwtRs256(token, jwtConfig.inbound);
+      await verifyJwtRs256(token, jwtConfig.inbound, config, env);
     } else {
       const issuerState = await getIssuerKeyState(env);
       let verified = false;
@@ -3677,6 +4678,20 @@ async function handleRequestCore(request, env, payload, ctx) {
   const enrichedHeaders = await loadEnrichedHeadersMap(env);
   for (const [name, value] of Object.entries(enrichedHeaders)) {
     upstreamHeaders.set(name, value);
+  }
+
+  const upstreamAuthProfile = String(payload?.upstream?.auth_profile || "").trim();
+  if (upstreamAuthProfile) {
+    const profiles = isNonArrayObject(config?.http_auth?.profiles) ? config.http_auth.profiles : {};
+    if (!profiles?.[upstreamAuthProfile]) {
+      throw new HttpError(400, "INVALID_REQUEST", "upstream.auth_profile must reference a defined http_auth profile", {
+        expected: "Define http_auth.profiles.<name> in config YAML",
+      });
+    }
+    const authHeaders = await resolveAuthProfileHeaders(upstreamAuthProfile, config, env);
+    for (const [name, value] of Object.entries(authHeaders)) {
+      upstreamHeaders.set(name, value);
+    }
   }
 
   if (jwtConfig?.enabled && jwtConfig?.outbound?.enabled) {
@@ -3840,6 +4855,7 @@ async function handleRequestCore(request, env, payload, ctx) {
       timestamp: fmtTs(),
       text: traceText,
     };
+    broadcastLiveLogEvent("trace", lastDebugTrace);
     const sink = await pushDebugTraceToLoggingUrl(traceText, debugTrace, config, env);
     const loggingUrlStatus = !sink.attempted
       ? "off"
